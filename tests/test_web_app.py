@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from ai_gateway import AIConfigStore, AIGateway
+from auth import AuthStore, LoginThrottle
 from media_enhancer import enhance_media
 from web_app import create_app
 
@@ -83,10 +84,27 @@ class WebAppTests(unittest.TestCase):
             AIConfigStore(Path(self.temporary.name) / "ai_config.json"),
             timeout=2,
         )
+        self.auth_store = AuthStore(Path(self.temporary.name) / "users.db")
         self.client_context = TestClient(
-            create_app(runtime=self.runtime, ai_gateway=self.ai_gateway)
+            create_app(
+                runtime=self.runtime,
+                ai_gateway=self.ai_gateway,
+                auth_store=self.auth_store,
+                login_throttle=LoginThrottle(max_attempts=2, window_seconds=60),
+            )
         )
         self.client = self.client_context.__enter__()
+        self.registration_response = self.client.post(
+            "/api/auth/register",
+            json={
+                "email": "admin@example.com",
+                "display_name": "系统管理员",
+                "password": "AdminPass2026",
+            },
+        )
+        self.assertEqual(self.registration_response.status_code, 201)
+        self.admin_session = self.registration_response.json()
+        self.client.headers.update({"X-CSRF-Token": self.admin_session["csrf_token"]})
 
     def tearDown(self):
         self.client_context.__exit__(None, None, None)
@@ -100,6 +118,141 @@ class WebAppTests(unittest.TestCase):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
         self.assertIn("小红书素材下载", page.text)
+
+    def test_registration_login_session_and_security_headers(self):
+        self.assertEqual(self.admin_session["user"]["role"], "admin")
+        cookie = self.registration_response.headers["set-cookie"].lower()
+        self.assertIn("httponly", cookie)
+        self.assertIn("samesite=strict", cookie)
+
+        anonymous = TestClient(self.client.app)
+        protected = anonymous.get("/api/state")
+        self.assertEqual(protected.status_code, 401)
+        self.assertEqual(protected.headers["x-frame-options"], "DENY")
+
+        status = anonymous.get("/api/auth/status")
+        self.assertEqual(status.status_code, 200)
+        self.assertFalse(status.json()["needs_setup"])
+        self.assertTrue(status.json()["registration_enabled"])
+
+        invalid_csrf = self.client.post(
+            "/api/tasks",
+            headers={"X-CSRF-Token": "invalid"},
+            json={"content": "https://www.xiaohongshu.com/explore/example"},
+        )
+        self.assertEqual(invalid_csrf.status_code, 403)
+
+        anonymous.post(
+            "/api/auth/login",
+            json={"email": "admin@example.com", "password": "wrong-1"},
+        )
+        anonymous.post(
+            "/api/auth/login",
+            json={"email": "admin@example.com", "password": "wrong-2"},
+        )
+        blocked = anonymous.post(
+            "/api/auth/login",
+            json={"email": "admin@example.com", "password": "AdminPass2026"},
+        )
+        self.assertEqual(blocked.status_code, 429)
+        self.assertIn("retry-after", blocked.headers)
+
+    def test_regular_user_account_lifecycle_and_admin_boundaries(self):
+        user_client = TestClient(self.client.app)
+        registered = user_client.post(
+            "/api/auth/register",
+            json={
+                "email": "member@example.com",
+                "display_name": "内容成员",
+                "password": "MemberPass2026",
+            },
+        )
+        self.assertEqual(registered.status_code, 201)
+        user_session = registered.json()
+        self.assertEqual(user_session["user"]["role"], "user")
+        user_client.headers.update({"X-CSRF-Token": user_session["csrf_token"]})
+
+        config = user_client.get("/api/ai/config")
+        self.assertFalse(config.json()["editable"])
+        self.assertNotIn("base_url", config.json())
+        forbidden = user_client.put(
+            "/api/ai/config",
+            json={"base_url": "https://example.com/v1", "model": "demo"},
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
+        renamed = user_client.put(
+            "/api/auth/profile",
+            json={"display_name": "内容运营"},
+        )
+        self.assertEqual(renamed.status_code, 200)
+        self.assertEqual(renamed.json()["user"]["display_name"], "内容运营")
+
+        changed = user_client.put(
+            "/api/auth/password",
+            json={
+                "current_password": "MemberPass2026",
+                "new_password": "NewMemberPass2026",
+            },
+        )
+        self.assertEqual(changed.status_code, 200)
+        user_client.headers.update({"X-CSRF-Token": changed.json()["csrf_token"]})
+        self.assertEqual(user_client.get("/api/auth/me").status_code, 200)
+
+        user_client.post("/api/auth/logout")
+        old_password = user_client.post(
+            "/api/auth/login",
+            json={"email": "member@example.com", "password": "MemberPass2026"},
+        )
+        self.assertEqual(old_password.status_code, 401)
+        new_password = user_client.post(
+            "/api/auth/login",
+            json={
+                "email": "member@example.com",
+                "password": "NewMemberPass2026",
+            },
+        )
+        self.assertEqual(new_password.status_code, 200)
+
+    def test_admin_can_manage_registration_and_disable_users(self):
+        member = self.auth_store.register(
+            "disabled@example.com",
+            "待停用用户",
+            "DisabledPass2026",
+        )
+        users = self.client.get("/api/admin/users")
+        self.assertEqual(users.status_code, 200)
+        self.assertEqual(len(users.json()["users"]), 2)
+
+        disabled = self.client.patch(
+            f"/api/admin/users/{member['id']}",
+            json={"is_active": False},
+        )
+        self.assertEqual(disabled.status_code, 200)
+        self.assertFalse(disabled.json()["user"]["is_active"])
+        login = self.client.post(
+            "/api/auth/login",
+            json={
+                "email": "disabled@example.com",
+                "password": "DisabledPass2026",
+            },
+        )
+        self.assertEqual(login.status_code, 401)
+
+        closed = self.client.put(
+            "/api/admin/registration",
+            json={"enabled": False},
+        )
+        self.assertFalse(closed.json()["registration_enabled"])
+        rejected = TestClient(self.client.app).post(
+            "/api/auth/register",
+            json={
+                "email": "late@example.com",
+                "display_name": "迟到用户",
+                "password": "LateUserPass2026",
+            },
+        )
+        self.assertEqual(rejected.status_code, 409)
 
     def test_task_clipboard_cookie_and_clear_endpoints(self):
         invalid = self.client.post("/api/tasks", json={"content": "not a link"})

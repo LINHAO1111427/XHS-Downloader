@@ -1,0 +1,1949 @@
+diff --git a/README.md b/README.md
+index 701c536..ee24cb7 100644
+--- a/README.md
++++ b/README.md
+@@ -101,6 +101,14 @@
+ <li>运行 <code>uv run main.py</code> 命令启动 XHS-Downloader</li>
+ </ol>
+ </ol>
++<h2>🌐 多用户 Web 工作台</h2>
++<ol>
++<li>运行 <code>.\start-web.ps1</code>，浏览器打开 <code>http://127.0.0.1:5557</code></li>
++<li>首次注册的账号自动成为管理员；后续账号为普通用户</li>
++<li>管理员可在“用户管理”中启停账号或关闭开放注册</li>
++<li>管理员在“AI 中转设置”中保存 Base URL、API Key 和模型；普通用户的 AI 请求统一通过该服务端中转配置</li>
++</ol>
++<p>账号、会话与 AI 密钥保存在 <code>Volume</code> 目录，不会提交到 Git。可通过 <code>XHS_AUTH_DB_PATH</code> 和 <code>XHS_AI_CONFIG_PATH</code> 指定存储位置。对外提供服务时，可运行 <code>.\start-web.ps1 -BindHost 0.0.0.0 -NoBrowser</code>，并使用 HTTPS 反向代理；同时设置环境变量 <code>XHS_WEB_SECURE_COOKIE=true</code>。</p>
+ <h2>⌨️ Docker 运行</h2>
+ <ol>
+ <li>获取镜像</li>
+diff --git a/auth.py b/auth.py
+new file mode 100644
+index 0000000..84c5df5
+--- /dev/null
++++ b/auth.py
+@@ -0,0 +1,499 @@
++from __future__ import annotations
++
++import base64
++import hashlib
++import hmac
++import os
++import re
++import sqlite3
++from contextlib import contextmanager
++from pathlib import Path
++from secrets import token_bytes, token_urlsafe
++from threading import Lock
++from time import monotonic, time
++from typing import Iterator
++from uuid import uuid4
++
++
++SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
++PASSWORD_MIN_LENGTH = 10
++PASSWORD_MAX_LENGTH = 128
++EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
++SCRYPT_N = 2**14
++SCRYPT_R = 8
++SCRYPT_P = 1
++
++
++class AuthError(ValueError):
++    pass
++
++
++class RegistrationClosed(AuthError):
++    pass
++
++
++class AccountConflict(AuthError):
++    pass
++
++
++class InvalidCredentials(AuthError):
++    pass
++
++
++class AccountDisabled(AuthError):
++    pass
++
++
++class AdminActionError(AuthError):
++    pass
++
++
++class LoginBlocked(AuthError):
++    def __init__(self, retry_after: int) -> None:
++        super().__init__(f"登录尝试过多，请在 {retry_after} 秒后重试")
++        self.retry_after = retry_after
++
++
++def normalize_email(value: str) -> str:
++    email = value.strip().casefold()
++    if len(email) > 254 or not EMAIL_PATTERN.fullmatch(email):
++        raise AuthError("请输入有效的邮箱地址")
++    return email
++
++
++def validate_display_name(value: str) -> str:
++    display_name = " ".join(value.strip().split())
++    if not 2 <= len(display_name) <= 40:
++        raise AuthError("昵称长度需要在 2 到 40 个字符之间")
++    return display_name
++
++
++def validate_password(value: str) -> str:
++    if not PASSWORD_MIN_LENGTH <= len(value) <= PASSWORD_MAX_LENGTH:
++        raise AuthError("密码长度需要在 10 到 128 个字符之间")
++    if not any(character.isalpha() for character in value) or not any(
++        character.isdigit() for character in value
++    ):
++        raise AuthError("密码必须同时包含字母和数字")
++    return value
++
++
++def hash_password(password: str) -> str:
++    salt = token_bytes(16)
++    digest = hashlib.scrypt(
++        password.encode("utf-8"),
++        salt=salt,
++        n=SCRYPT_N,
++        r=SCRYPT_R,
++        p=SCRYPT_P,
++        dklen=32,
++    )
++    return "$".join(
++        (
++            "scrypt",
++            str(SCRYPT_N),
++            str(SCRYPT_R),
++            str(SCRYPT_P),
++            base64.urlsafe_b64encode(salt).decode("ascii"),
++            base64.urlsafe_b64encode(digest).decode("ascii"),
++        )
++    )
++
++
++def verify_password(password: str, encoded: str) -> bool:
++    try:
++        algorithm, n, r, p, salt_value, digest_value = encoded.split("$")
++        if algorithm != "scrypt":
++            return False
++        salt = base64.urlsafe_b64decode(salt_value.encode("ascii"))
++        expected = base64.urlsafe_b64decode(digest_value.encode("ascii"))
++        actual = hashlib.scrypt(
++            password.encode("utf-8"),
++            salt=salt,
++            n=int(n),
++            r=int(r),
++            p=int(p),
++            dklen=len(expected),
++        )
++    except (ValueError, TypeError):
++        return False
++    return hmac.compare_digest(actual, expected)
++
++
++class LoginThrottle:
++    def __init__(
++        self,
++        max_attempts: int = 5,
++        window_seconds: int = 15 * 60,
++    ) -> None:
++        self.max_attempts = max_attempts
++        self.window_seconds = window_seconds
++        self._attempts: dict[str, list[float]] = {}
++        self._lock = Lock()
++
++    def check(self, key: str) -> None:
++        now = monotonic()
++        with self._lock:
++            attempts = self._recent(key, now)
++            if len(attempts) >= self.max_attempts:
++                retry_after = max(1, int(self.window_seconds - (now - attempts[0])))
++                raise LoginBlocked(retry_after)
++
++    def fail(self, key: str) -> None:
++        now = monotonic()
++        with self._lock:
++            attempts = self._recent(key, now)
++            attempts.append(now)
++            self._attempts[key] = attempts
++
++    def success(self, key: str) -> None:
++        with self._lock:
++            self._attempts.pop(key, None)
++
++    def _recent(self, key: str, now: float) -> list[float]:
++        threshold = now - self.window_seconds
++        attempts = [value for value in self._attempts.get(key, []) if value > threshold]
++        if attempts:
++            self._attempts[key] = attempts
++        else:
++            self._attempts.pop(key, None)
++        return attempts
++
++
++class AuthStore:
++    def __init__(self, path: Path, session_ttl: int = SESSION_TTL_SECONDS) -> None:
++        self.path = path
++        self.session_ttl = session_ttl
++        self.path.parent.mkdir(parents=True, exist_ok=True)
++        self._initialize()
++        self._dummy_password = hash_password("timing-equalizer-2026")
++
++    @contextmanager
++    def _connection(self) -> Iterator[sqlite3.Connection]:
++        connection = sqlite3.connect(self.path, timeout=10)
++        connection.row_factory = sqlite3.Row
++        connection.execute("PRAGMA foreign_keys = ON")
++        try:
++            yield connection
++        finally:
++            connection.close()
++
++    def _initialize(self) -> None:
++        with self._connection() as connection:
++            connection.executescript(
++                """
++                PRAGMA journal_mode = WAL;
++                CREATE TABLE IF NOT EXISTS users (
++                    id TEXT PRIMARY KEY,
++                    email TEXT NOT NULL UNIQUE,
++                    display_name TEXT NOT NULL,
++                    password_hash TEXT NOT NULL,
++                    role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
++                    is_active INTEGER NOT NULL DEFAULT 1,
++                    created_at INTEGER NOT NULL,
++                    updated_at INTEGER NOT NULL,
++                    last_login_at INTEGER
++                );
++                CREATE TABLE IF NOT EXISTS sessions (
++                    token_hash TEXT PRIMARY KEY,
++                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++                    csrf_token TEXT NOT NULL,
++                    created_at INTEGER NOT NULL,
++                    expires_at INTEGER NOT NULL
++                );
++                CREATE INDEX IF NOT EXISTS sessions_user_id ON sessions(user_id);
++                CREATE INDEX IF NOT EXISTS sessions_expires_at ON sessions(expires_at);
++                CREATE TABLE IF NOT EXISTS app_settings (
++                    key TEXT PRIMARY KEY,
++                    value TEXT NOT NULL
++                );
++                INSERT OR IGNORE INTO app_settings(key, value)
++                VALUES ('registration_enabled', 'true');
++                """
++            )
++        try:
++            os.chmod(self.path, 0o600)
++        except OSError:
++            pass
++
++    def status(self) -> dict:
++        with self._connection() as connection:
++            user_count = int(
++                connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
++            )
++            enabled = self._registration_enabled(connection)
++        return {
++            "needs_setup": user_count == 0,
++            "registration_enabled": user_count == 0 or enabled,
++        }
++
++    def register(self, email: str, display_name: str, password: str) -> dict:
++        normalized_email = normalize_email(email)
++        normalized_name = validate_display_name(display_name)
++        password_hash = hash_password(validate_password(password))
++        now = int(time())
++        user_id = uuid4().hex
++        with self._connection() as connection:
++            connection.execute("BEGIN IMMEDIATE")
++            user_count = int(
++                connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
++            )
++            if user_count and not self._registration_enabled(connection):
++                connection.rollback()
++                raise RegistrationClosed("管理员已关闭新用户注册")
++            role = "admin" if user_count == 0 else "user"
++            try:
++                connection.execute(
++                    """
++                    INSERT INTO users(
++                        id, email, display_name, password_hash, role,
++                        is_active, created_at, updated_at
++                    ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
++                    """,
++                    (
++                        user_id,
++                        normalized_email,
++                        normalized_name,
++                        password_hash,
++                        role,
++                        now,
++                        now,
++                    ),
++                )
++                connection.commit()
++            except sqlite3.IntegrityError as error:
++                connection.rollback()
++                raise AccountConflict("该邮箱已经注册") from error
++        return self.get_user(user_id)
++
++    def authenticate(self, email: str, password: str) -> dict:
++        try:
++            normalized_email = normalize_email(email)
++        except AuthError as error:
++            verify_password(password, self._dummy_password)
++            raise InvalidCredentials("邮箱或密码错误") from error
++        with self._connection() as connection:
++            row = connection.execute(
++                "SELECT * FROM users WHERE email = ?",
++                (normalized_email,),
++            ).fetchone()
++            encoded = row["password_hash"] if row else self._dummy_password
++            valid = verify_password(password, encoded)
++            if not row or not valid:
++                raise InvalidCredentials("邮箱或密码错误")
++            if not row["is_active"]:
++                raise AccountDisabled("账号已被停用")
++            now = int(time())
++            connection.execute(
++                "UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?",
++                (now, now, row["id"]),
++            )
++            connection.commit()
++        return self.get_user(str(row["id"]))
++
++    def create_session(self, user_id: str) -> dict:
++        token = token_urlsafe(32)
++        csrf_token = token_urlsafe(24)
++        now = int(time())
++        expires_at = now + self.session_ttl
++        with self._connection() as connection:
++            connection.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
++            connection.execute(
++                """
++                INSERT INTO sessions(
++                    token_hash, user_id, csrf_token, created_at, expires_at
++                ) VALUES (?, ?, ?, ?, ?)
++                """,
++                (self._token_hash(token), user_id, csrf_token, now, expires_at),
++            )
++            connection.commit()
++        return {
++            "token": token,
++            "csrf_token": csrf_token,
++            "expires_at": expires_at,
++        }
++
++    def session(self, token: str) -> dict | None:
++        if not token:
++            return None
++        now = int(time())
++        token_hash = self._token_hash(token)
++        with self._connection() as connection:
++            row = connection.execute(
++                """
++                SELECT
++                    sessions.csrf_token,
++                    sessions.expires_at,
++                    users.id,
++                    users.email,
++                    users.display_name,
++                    users.role,
++                    users.is_active,
++                    users.created_at,
++                    users.updated_at,
++                    users.last_login_at
++                FROM sessions
++                JOIN users ON users.id = sessions.user_id
++                WHERE sessions.token_hash = ? AND sessions.expires_at > ?
++                """,
++                (token_hash, now),
++            ).fetchone()
++            if not row or not row["is_active"]:
++                connection.execute(
++                    "DELETE FROM sessions WHERE token_hash = ?",
++                    (token_hash,),
++                )
++                connection.commit()
++                return None
++        return {
++            "csrf_token": str(row["csrf_token"]),
++            "expires_at": int(row["expires_at"]),
++            "user": self._public_user(row),
++        }
++
++    def delete_session(self, token: str) -> None:
++        if not token:
++            return
++        with self._connection() as connection:
++            connection.execute(
++                "DELETE FROM sessions WHERE token_hash = ?",
++                (self._token_hash(token),),
++            )
++            connection.commit()
++
++    def get_user(self, user_id: str) -> dict:
++        with self._connection() as connection:
++            row = connection.execute(
++                "SELECT * FROM users WHERE id = ?",
++                (user_id,),
++            ).fetchone()
++        if not row:
++            raise AuthError("用户不存在")
++        return self._public_user(row)
++
++    def update_profile(self, user_id: str, display_name: str) -> dict:
++        normalized_name = validate_display_name(display_name)
++        with self._connection() as connection:
++            connection.execute(
++                "UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?",
++                (normalized_name, int(time()), user_id),
++            )
++            connection.commit()
++        return self.get_user(user_id)
++
++    def change_password(
++        self,
++        user_id: str,
++        current_password: str,
++        new_password: str,
++    ) -> None:
++        validate_password(new_password)
++        with self._connection() as connection:
++            row = connection.execute(
++                "SELECT password_hash FROM users WHERE id = ?",
++                (user_id,),
++            ).fetchone()
++            if not row or not verify_password(current_password, row["password_hash"]):
++                raise InvalidCredentials("当前密码错误")
++            connection.execute(
++                "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
++                (hash_password(new_password), int(time()), user_id),
++            )
++            connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
++            connection.commit()
++
++    def list_users(self) -> list[dict]:
++        now = int(time())
++        with self._connection() as connection:
++            rows = connection.execute(
++                """
++                SELECT users.*, COUNT(sessions.token_hash) AS session_count
++                FROM users
++                LEFT JOIN sessions
++                    ON sessions.user_id = users.id AND sessions.expires_at > ?
++                GROUP BY users.id
++                ORDER BY users.created_at ASC
++                """,
++                (now,),
++            ).fetchall()
++        return [
++            {**self._public_user(row), "session_count": int(row["session_count"])}
++            for row in rows
++        ]
++
++    def set_user_active(
++        self,
++        user_id: str,
++        is_active: bool,
++        acting_user_id: str,
++    ) -> dict:
++        if user_id == acting_user_id and not is_active:
++            raise AdminActionError("不能停用当前登录账号")
++        with self._connection() as connection:
++            connection.execute("BEGIN IMMEDIATE")
++            row = connection.execute(
++                "SELECT role, is_active FROM users WHERE id = ?",
++                (user_id,),
++            ).fetchone()
++            if not row:
++                connection.rollback()
++                raise AuthError("用户不存在")
++            if row["role"] == "admin" and row["is_active"] and not is_active:
++                admin_count = int(
++                    connection.execute(
++                        "SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active = 1"
++                    ).fetchone()[0]
++                )
++                if admin_count <= 1:
++                    connection.rollback()
++                    raise AdminActionError("必须保留至少一个启用的管理员")
++            connection.execute(
++                "UPDATE users SET is_active = ?, updated_at = ? WHERE id = ?",
++                (int(is_active), int(time()), user_id),
++            )
++            if not is_active:
++                connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
++            connection.commit()
++        return self.get_user(user_id)
++
++    def registration_enabled(self) -> bool:
++        with self._connection() as connection:
++            return self._registration_enabled(connection)
++
++    def set_registration_enabled(self, enabled: bool) -> bool:
++        with self._connection() as connection:
++            connection.execute(
++                """
++                INSERT INTO app_settings(key, value) VALUES ('registration_enabled', ?)
++                ON CONFLICT(key) DO UPDATE SET value = excluded.value
++                """,
++                ("true" if enabled else "false",),
++            )
++            connection.commit()
++        return enabled
++
++    @staticmethod
++    def _registration_enabled(connection: sqlite3.Connection) -> bool:
++        row = connection.execute(
++            "SELECT value FROM app_settings WHERE key = 'registration_enabled'"
++        ).fetchone()
++        return not row or str(row["value"]).lower() == "true"
++
++    @staticmethod
++    def _token_hash(token: str) -> str:
++        return hashlib.sha256(token.encode("utf-8")).hexdigest()
++
++    @staticmethod
++    def _public_user(row: sqlite3.Row) -> dict:
++        return {
++            "id": str(row["id"]),
++            "email": str(row["email"]),
++            "display_name": str(row["display_name"]),
++            "role": str(row["role"]),
++            "is_active": bool(row["is_active"]),
++            "created_at": int(row["created_at"]),
++            "updated_at": int(row["updated_at"]),
++            "last_login_at": (
++                int(row["last_login_at"]) if row["last_login_at"] else None
++            ),
++        }
+diff --git a/pyproject.toml b/pyproject.toml
+index e02aa4d..de06f9b 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -28,7 +28,7 @@ dependencies = [
+ ]
+ 
+ [project.urls]
+-Repository = "https://github.com/JoeanAmier/XHS-Downloader"
++Repository = "https://github.com/LINHAO1111427/XHS-Downloader"
+ 
+ [tool.uv.pip]
+ index-url = "https://mirrors.ustc.edu.cn/pypi/simple"
+diff --git a/start-web.ps1 b/start-web.ps1
+index f5f6d44..9de2129 100644
+--- a/start-web.ps1
++++ b/start-web.ps1
+@@ -1,11 +1,13 @@
+ [CmdletBinding()]
+ param(
+-    [int]$Port = 5557
++    [int]$Port = 5557,
++    [string]$BindHost = "127.0.0.1",
++    [switch]$NoBrowser
+ )
+ 
+ $ErrorActionPreference = "Stop"
+-$hostName = "127.0.0.1"
+-$url = "http://${hostName}:$Port"
++$browserHost = if ($BindHost -in @("0.0.0.0", "::")) { "127.0.0.1" } else { $BindHost }
++$url = "http://${browserHost}:$Port"
+ $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+ $app = Join-Path $PSScriptRoot "web_app.py"
+ $installDir = Join-Path $PSScriptRoot ".install"
+@@ -18,17 +20,29 @@ New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+ function Test-WebService {
+     try {
+         $response = Invoke-RestMethod -Uri "$url/api/health" -TimeoutSec 1
+-        return [bool]$response.ok
++        return [bool]$response.ok -and $response.authentication -eq "session"
+     }
+     catch {
+         return $false
+     }
+ }
+ 
++function Get-ListenerProcessId {
++    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
++        Select-Object -First 1
++    if ($listener) {
++        return [int]$listener.OwningProcess
++    }
++    return $null
++}
++
+ if (-not (Test-WebService)) {
++    if (Get-ListenerProcessId) {
++        throw "Port $Port is occupied by a different or outdated service. Run .\stop-web.ps1 -Port $Port first."
++    }
+     $startParameters = @{
+         FilePath = $python
+-        ArgumentList = @($app, "--host", $hostName, "--port", $Port)
++        ArgumentList = @($app, "--host", $BindHost, "--port", $Port)
+         WorkingDirectory = $PSScriptRoot
+         WindowStyle = "Hidden"
+         RedirectStandardOutput = $stdout
+@@ -36,7 +50,10 @@ if (-not (Test-WebService)) {
+         PassThru = $true
+     }
+     $process = Start-Process @startParameters
+-    Set-Content -LiteralPath $pidFile -Value $process.Id -Encoding ascii
++    @{
++        ProcessId = $process.Id
++        Port = $Port
++    } | ConvertTo-Json | Set-Content -LiteralPath $pidFile -Encoding ascii
+ 
+     $ready = $false
+     for ($attempt = 0; $attempt -lt 30; $attempt += 1) {
+@@ -52,7 +69,15 @@ if (-not (Test-WebService)) {
+     if (-not $ready) {
+         throw "Web service failed to start. See $stderr"
+     }
++    $listenerProcessId = Get-ListenerProcessId
++    @{
++        ProcessId = $listenerProcessId
++        ParentProcessId = $process.Id
++        Port = $Port
++    } | ConvertTo-Json | Set-Content -LiteralPath $pidFile -Encoding ascii
+ }
+ 
+-Start-Process $url
++if (-not $NoBrowser) {
++    Start-Process $url
++}
+ Write-Output "XHS-Downloader Web is running at $url"
+diff --git a/static/web/app.js b/static/web/app.js
+index 4990f50..dfa7e64 100644
+--- a/static/web/app.js
++++ b/static/web/app.js
+@@ -1,6 +1,22 @@
+ const byId = (id) => document.getElementById(id);
+ 
+ const elements = {
++    authView: byId("authView"),
++    appView: byId("appView"),
++    authTitle: byId("authTitle"),
++    authSubtitle: byId("authSubtitle"),
++    authModes: byId("authModes"),
++    authModeInputs: document.querySelectorAll('input[name="authMode"]'),
++    registerModeLabel: byId("registerModeLabel"),
++    authForm: byId("authForm"),
++    displayNameField: byId("displayNameField"),
++    authDisplayName: byId("authDisplayName"),
++    authEmail: byId("authEmail"),
++    authPassword: byId("authPassword"),
++    confirmPasswordField: byId("confirmPasswordField"),
++    authConfirmPassword: byId("authConfirmPassword"),
++    authSubmitButton: byId("authSubmitButton"),
++    authMessage: byId("authMessage"),
+     serviceStatus: byId("serviceStatus"),
+     downloadRoot: byId("downloadRoot"),
+     urlInput: byId("urlInput"),
+@@ -39,6 +55,22 @@ const elements = {
+     generatedImagePreview: byId("generatedImagePreview"),
+     generatedImageDownload: byId("generatedImageDownload"),
+     aiSettingsButton: byId("aiSettingsButton"),
++    adminUsersButton: byId("adminUsersButton"),
++    adminUsersDialog: byId("adminUsersDialog"),
++    userSummary: byId("userSummary"),
++    registrationEnabled: byId("registrationEnabled"),
++    userList: byId("userList"),
++    accountButton: byId("accountButton"),
++    accountInitial: byId("accountInitial"),
++    accountDialog: byId("accountDialog"),
++    accountMeta: byId("accountMeta"),
++    profileForm: byId("profileForm"),
++    profileDisplayName: byId("profileDisplayName"),
++    passwordForm: byId("passwordForm"),
++    currentPassword: byId("currentPassword"),
++    newPassword: byId("newPassword"),
++    confirmNewPassword: byId("confirmNewPassword"),
++    logoutButton: byId("logoutButton"),
+     aiSettingsDialog: byId("aiSettingsDialog"),
+     aiSettingsForm: byId("aiSettingsForm"),
+     aiConfigState: byId("aiConfigState"),
+@@ -85,20 +117,41 @@ let toastTimer = null;
+ let previousTaskFingerprint = "";
+ let previousEnhancementFingerprint = "";
+ let currentMediaIndex = -1;
++let currentUser = null;
++let csrfToken = "";
++let authStatus = { needs_setup: false, registration_enabled: true };
++let pollTimers = [];
++let authGeneration = 0;
+ 
+ function refreshIcons() {
+     if (window.lucide) window.lucide.createIcons({ attrs: { "stroke-width": 1.8 } });
+ }
+ 
++class APIError extends Error {
++    constructor(message, status) {
++        super(message);
++        this.status = status;
++    }
++}
++
+ async function api(path, options = {}) {
++    const requestGeneration = authGeneration;
++    const method = (options.method || "GET").toUpperCase();
++    const headers = { ...(options.headers || {}) };
++    if (options.body !== undefined) headers["Content-Type"] = "application/json";
++    if (!new Set(["GET", "HEAD", "OPTIONS"]).has(method) && csrfToken) {
++        headers["X-CSRF-Token"] = csrfToken;
++    }
+     const response = await fetch(path, {
+         ...options,
+-        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
++        credentials: "same-origin",
++        headers,
+     });
+     if (!response.ok) {
+         let message = `请求失败 (${response.status})`;
+         try { message = (await response.json()).detail || message; } catch (_) { /* no-op */ }
+-        throw new Error(message);
++        if (response.status === 401 && !path.startsWith("/api/auth/") && requestGeneration === authGeneration) showAuth();
++        throw new APIError(message, response.status);
+     }
+     return response.status === 204 ? null : response.json();
+ }
+@@ -110,6 +163,239 @@ function showToast(message, error = false) {
+     toastTimer = setTimeout(() => { elements.toast.className = "toast"; }, 3200);
+ }
+ 
++function authMode() {
++    return [...elements.authModeInputs].find((input) => input.checked)?.value || "login";
++}
++
++function renderAuthMode() {
++    let mode = authMode();
++    if (mode === "register" && !authStatus.registration_enabled) {
++        elements.authModeInputs[0].checked = true;
++        mode = "login";
++    }
++    const registering = mode === "register";
++    elements.displayNameField.hidden = !registering;
++    elements.confirmPasswordField.hidden = !registering;
++    elements.authDisplayName.required = registering;
++    elements.authConfirmPassword.required = registering;
++    elements.authPassword.autocomplete = registering ? "new-password" : "current-password";
++    elements.authTitle.textContent = registering ? (authStatus.needs_setup ? "创建管理员账号" : "创建账号") : "登录账号";
++    elements.authSubtitle.textContent = registering ? "填写账号信息后进入工作台" : "使用你的账号进入工作台";
++    elements.authSubmitButton.lastElementChild.textContent = registering ? "注册并进入" : "登录";
++    elements.authSubmitButton.firstElementChild.setAttribute("data-lucide", registering ? "user-plus" : "log-in");
++    elements.authMessage.textContent = authStatus.needs_setup && registering ? "首个注册账号将成为系统管理员" : "";
++    elements.authMessage.classList.remove("error");
++    refreshIcons();
++}
++
++function stopPolling() {
++    pollTimers.forEach((timer) => clearInterval(timer));
++    pollTimers = [];
++}
++
++function showAuth(message = "") {
++    authGeneration += 1;
++    stopPolling();
++    currentUser = null;
++    csrfToken = "";
++    elements.appView.hidden = true;
++    elements.authView.hidden = false;
++    elements.authPassword.value = "";
++    elements.authConfirmPassword.value = "";
++    if (message) {
++        elements.authMessage.textContent = message;
++        elements.authMessage.classList.add("error");
++    }
++    elements.authEmail.focus();
++}
++
++function renderCurrentUser() {
++    const admin = currentUser?.role === "admin";
++    const firstCharacter = Array.from(currentUser?.display_name || "用户")[0] || "用";
++    elements.accountInitial.textContent = firstCharacter.toLocaleUpperCase();
++    elements.accountMeta.textContent = `${currentUser.email} · ${admin ? "管理员" : "普通用户"}`;
++    elements.profileDisplayName.value = currentUser.display_name;
++    elements.adminUsersButton.hidden = !admin;
++    elements.aiSettingsButton.hidden = !admin;
++    elements.settingsButton.hidden = !admin;
++    elements.openFolderButton.hidden = !admin;
++}
++
++async function enterWorkspace(session) {
++    authGeneration += 1;
++    currentUser = session.user;
++    csrfToken = session.csrf_token;
++    elements.authView.hidden = true;
++    elements.appView.hidden = false;
++    renderCurrentUser();
++    refreshIcons();
++    stopPolling();
++    try {
++        await Promise.all([refreshState(), refreshLibrary(), refreshEnhancements(), loadAIConfig()]);
++    } catch (error) {
++        if (error.status !== 401) showToast(error.message, true);
++    }
++    if (!currentUser) return;
++    pollTimers = [
++        setInterval(refreshState, 1000),
++        setInterval(refreshEnhancements, 1000),
++        setInterval(refreshLibrary, 5000),
++    ];
++}
++
++async function bootstrapAuthentication() {
++    try {
++        authStatus = await api("/api/auth/status");
++    } catch (error) {
++        showAuth("服务暂时不可用，请稍后重试");
++        return;
++    }
++    elements.registerModeLabel.hidden = !authStatus.registration_enabled;
++    if (authStatus.needs_setup) {
++        elements.authModeInputs.forEach((input) => { input.checked = input.value === "register"; });
++    }
++    renderAuthMode();
++    try {
++        await enterWorkspace(await api("/api/auth/me"));
++    } catch (error) {
++        if (error.status !== 401) showAuth(error.message);
++        else showAuth();
++    }
++}
++
++async function submitAuthentication(event) {
++    event.preventDefault();
++    const registering = authMode() === "register";
++    if (registering && elements.authPassword.value !== elements.authConfirmPassword.value) {
++        elements.authMessage.textContent = "两次输入的密码不一致";
++        elements.authMessage.classList.add("error");
++        elements.authConfirmPassword.focus();
++        return;
++    }
++    elements.authSubmitButton.disabled = true;
++    elements.authMessage.textContent = registering ? "正在创建账号" : "正在登录";
++    elements.authMessage.classList.remove("error");
++    const payload = {
++        email: elements.authEmail.value.trim(),
++        password: elements.authPassword.value,
++    };
++    if (registering) payload.display_name = elements.authDisplayName.value.trim();
++    try {
++        const session = await api(registering ? "/api/auth/register" : "/api/auth/login", {
++            method: "POST",
++            body: JSON.stringify(payload),
++        });
++        authStatus.needs_setup = false;
++        elements.authForm.reset();
++        await enterWorkspace(session);
++    } catch (error) {
++        elements.authMessage.textContent = error.message;
++        elements.authMessage.classList.add("error");
++    } finally {
++        elements.authSubmitButton.disabled = false;
++    }
++}
++
++function accountTime(value) {
++    return value ? formatTime(value) : "尚未登录";
++}
++
++function renderUsers(users) {
++    elements.userList.replaceChildren();
++    elements.userSummary.textContent = `${users.length} 个账号`;
++    users.forEach((user) => {
++        const row = document.createElement("div");
++        row.className = "user-row";
++
++        const identity = document.createElement("div");
++        identity.className = "user-identity";
++        const name = document.createElement("strong");
++        name.textContent = user.display_name;
++        const details = document.createElement("span");
++        details.textContent = `${user.email} · 最近登录 ${accountTime(user.last_login_at)}`;
++        identity.append(name, details);
++
++        const role = document.createElement("span");
++        role.className = `role-label${user.role === "admin" ? " admin" : ""}`;
++        role.textContent = user.role === "admin" ? "管理员" : "普通用户";
++
++        const toggle = document.createElement("label");
++        toggle.className = "user-toggle";
++        const checkbox = document.createElement("input");
++        checkbox.type = "checkbox";
++        checkbox.checked = user.is_active;
++        checkbox.disabled = user.id === currentUser.id;
++        const label = document.createElement("span");
++        label.textContent = user.is_active ? "已启用" : "已停用";
++        checkbox.addEventListener("change", async () => {
++            checkbox.disabled = true;
++            try {
++                await api(`/api/admin/users/${encodeURIComponent(user.id)}`, {
++                    method: "PATCH",
++                    body: JSON.stringify({ is_active: checkbox.checked }),
++                });
++                await loadUsers();
++                showToast(checkbox.checked ? "账号已启用" : "账号已停用");
++            } catch (error) {
++                checkbox.checked = !checkbox.checked;
++                checkbox.disabled = false;
++                showToast(error.message, true);
++            }
++        });
++        toggle.append(checkbox, label);
++        row.append(identity, role, toggle);
++        elements.userList.append(row);
++    });
++}
++
++async function loadUsers() {
++    const result = await api("/api/admin/users");
++    elements.registrationEnabled.checked = result.registration_enabled;
++    renderUsers(result.users);
++}
++
++async function saveProfile(event) {
++    event.preventDefault();
++    try {
++        const result = await api("/api/auth/profile", {
++            method: "PUT",
++            body: JSON.stringify({ display_name: elements.profileDisplayName.value.trim() }),
++        });
++        currentUser = result.user;
++        renderCurrentUser();
++        showToast("昵称已更新");
++    } catch (error) { showToast(error.message, true); }
++}
++
++async function savePassword(event) {
++    event.preventDefault();
++    if (elements.newPassword.value !== elements.confirmNewPassword.value) {
++        showToast("两次输入的新密码不一致", true);
++        elements.confirmNewPassword.focus();
++        return;
++    }
++    try {
++        const session = await api("/api/auth/password", {
++            method: "PUT",
++            body: JSON.stringify({
++                current_password: elements.currentPassword.value,
++                new_password: elements.newPassword.value,
++            }),
++        });
++        csrfToken = session.csrf_token;
++        currentUser = session.user;
++        elements.passwordForm.reset();
++        showToast("密码已更新，其他会话已退出");
++    } catch (error) { showToast(error.message, true); }
++}
++
++async function logout() {
++    stopPolling();
++    try { await api("/api/auth/logout", { method: "POST" }); } catch (_) { /* clear local session */ }
++    elements.accountDialog.close();
++    showAuth();
++}
++
+ function formatBytes(value) {
+     if (!Number.isFinite(value) || value < 0) return "-";
+     if (value < 1024) return `${value} B`;
+@@ -665,6 +951,39 @@ async function testAIConnection() {
+     }
+ }
+ 
++elements.authModeInputs.forEach((input) => input.addEventListener("change", renderAuthMode));
++elements.authForm.addEventListener("submit", submitAuthentication);
++elements.accountButton.addEventListener("click", () => {
++    renderCurrentUser();
++    elements.accountDialog.showModal();
++});
++elements.profileForm.addEventListener("submit", saveProfile);
++elements.passwordForm.addEventListener("submit", savePassword);
++elements.logoutButton.addEventListener("click", logout);
++elements.adminUsersButton.addEventListener("click", async () => {
++    elements.adminUsersDialog.showModal();
++    try { await loadUsers(); } catch (error) { showToast(error.message, true); }
++});
++elements.registrationEnabled.addEventListener("change", async () => {
++    elements.registrationEnabled.disabled = true;
++    try {
++        const result = await api("/api/admin/registration", {
++            method: "PUT",
++            body: JSON.stringify({ enabled: elements.registrationEnabled.checked }),
++        });
++        authStatus.registration_enabled = result.registration_enabled;
++        showToast(result.registration_enabled ? "已开放用户注册" : "已关闭用户注册");
++    } catch (error) {
++        elements.registrationEnabled.checked = !elements.registrationEnabled.checked;
++        showToast(error.message, true);
++    } finally {
++        elements.registrationEnabled.disabled = false;
++    }
++});
++document.querySelectorAll(".dialog-close").forEach((button) => {
++    button.addEventListener("click", () => button.closest("dialog").close());
++});
++
+ elements.pasteButton.addEventListener("click", pasteLink);
+ elements.clearInputButton.addEventListener("click", () => { elements.urlInput.value = ""; elements.urlInput.focus(); });
+ elements.downloadButton.addEventListener("click", createDownload);
+@@ -749,8 +1068,4 @@ elements.acceptDisclaimerButton.addEventListener("click", async () => {
+ 
+ syncAIGenerationMode();
+ refreshIcons();
+-Promise.all([refreshState(), refreshLibrary(), refreshEnhancements(), loadAIConfig()]).finally(() => {
+-    setInterval(refreshState, 1000);
+-    setInterval(refreshEnhancements, 1000);
+-    setInterval(refreshLibrary, 5000);
+-});
++bootstrapAuthentication();
+diff --git a/static/web/index.html b/static/web/index.html
+index 3e31c3b..07aaa1c 100644
+--- a/static/web/index.html
++++ b/static/web/index.html
+@@ -9,6 +9,29 @@
+     <link rel="stylesheet" href="/assets/styles.css">
+ </head>
+ <body>
++<section class="auth-view" id="authView" aria-labelledby="authTitle">
++    <div class="auth-brand">
++        <img src="/assets/logo.png" alt="" width="54" height="54">
++        <div><h1>小红书素材下载</h1><p>团队内容工作台</p></div>
++    </div>
++    <div class="auth-panel">
++        <div class="auth-heading"><h2 id="authTitle">登录账号</h2><p id="authSubtitle">使用你的账号进入工作台</p></div>
++        <div class="segmented-control auth-modes" id="authModes">
++            <label><input type="radio" name="authMode" value="login" checked><span>登录</span></label>
++            <label id="registerModeLabel"><input type="radio" name="authMode" value="register"><span>注册</span></label>
++        </div>
++        <form class="auth-form" id="authForm">
++            <label class="text-field" id="displayNameField" for="authDisplayName" hidden><span>昵称</span><input id="authDisplayName" type="text" minlength="2" maxlength="40" autocomplete="name" placeholder="你的称呼"></label>
++            <label class="text-field" for="authEmail"><span>邮箱</span><input id="authEmail" type="email" maxlength="254" autocomplete="email" placeholder="name@example.com" required></label>
++            <label class="text-field" for="authPassword"><span>密码</span><input id="authPassword" type="password" minlength="10" maxlength="128" autocomplete="current-password" placeholder="输入密码" required></label>
++            <label class="text-field" id="confirmPasswordField" for="authConfirmPassword" hidden><span>确认密码</span><input id="authConfirmPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" placeholder="再次输入密码"></label>
++            <button class="button primary auth-submit" id="authSubmitButton" type="submit"><i data-lucide="log-in"></i><span>登录</span></button>
++        </form>
++        <p class="auth-message" id="authMessage" role="status"></p>
++    </div>
++</section>
++
++<div id="appView" hidden>
+ <header class="app-header">
+     <div class="brand">
+         <img src="/assets/logo.png" alt="" width="42" height="42">
+@@ -16,15 +39,19 @@
+     </div>
+     <div class="header-actions">
+         <span class="service-status" id="serviceStatus"><i></i><span>正在连接</span></span>
+-        <button class="icon-button" id="aiSettingsButton" type="button" title="AI 中转设置" aria-label="AI 中转设置">
++        <button class="icon-button" id="adminUsersButton" type="button" title="用户管理" aria-label="用户管理" hidden>
++            <i data-lucide="users"></i>
++        </button>
++        <button class="icon-button" id="aiSettingsButton" type="button" title="AI 中转设置" aria-label="AI 中转设置" hidden>
+             <i data-lucide="bot"></i>
+         </button>
+-        <button class="icon-button" id="settingsButton" type="button" title="Cookie 设置" aria-label="Cookie 设置">
++        <button class="icon-button" id="settingsButton" type="button" title="Cookie 设置" aria-label="Cookie 设置" hidden>
+             <i data-lucide="settings-2"></i>
+         </button>
+-        <button class="icon-button" id="openFolderButton" type="button" title="打开下载目录" aria-label="打开下载目录">
++        <button class="icon-button" id="openFolderButton" type="button" title="打开下载目录" aria-label="打开下载目录" hidden>
+             <i data-lucide="folder-open"></i>
+         </button>
++        <button class="account-button" id="accountButton" type="button" title="账号中心" aria-label="账号中心"><span id="accountInitial">用</span></button>
+     </div>
+ </header>
+ 
+@@ -112,6 +139,33 @@
+         </div>
+     </section>
+ </main>
++</div>
++
++<dialog id="accountDialog">
++    <div class="dialog-shell">
++        <div class="dialog-heading"><div><h2>账号中心</h2><p id="accountMeta"></p></div><button class="icon-button subtle dialog-close" type="button" aria-label="关闭"><i data-lucide="x"></i></button></div>
++        <form class="form-grid" id="profileForm">
++            <label class="text-field" for="profileDisplayName"><span>昵称</span><input id="profileDisplayName" type="text" minlength="2" maxlength="40" autocomplete="name" required></label>
++            <button class="button secondary form-submit" type="submit"><i data-lucide="save"></i>更新昵称</button>
++        </form>
++        <div class="dialog-divider"></div>
++        <form class="form-grid" id="passwordForm">
++            <label class="text-field" for="currentPassword"><span>当前密码</span><input id="currentPassword" type="password" maxlength="128" autocomplete="current-password" required></label>
++            <label class="text-field" for="newPassword"><span>新密码</span><input id="newPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></label>
++            <label class="text-field" for="confirmNewPassword"><span>确认新密码</span><input id="confirmNewPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></label>
++            <button class="button secondary form-submit" type="submit"><i data-lucide="key-round"></i>更新密码</button>
++        </form>
++        <div class="dialog-actions account-actions"><button class="button danger" id="logoutButton" type="button"><i data-lucide="log-out"></i>退出登录</button></div>
++    </div>
++</dialog>
++
++<dialog id="adminUsersDialog" class="admin-dialog">
++    <div class="dialog-shell">
++        <div class="dialog-heading"><div><h2>用户管理</h2><p id="userSummary">正在读取用户</p></div><button class="icon-button subtle dialog-close" type="button" aria-label="关闭"><i data-lucide="x"></i></button></div>
++        <label class="setting-row" for="registrationEnabled"><span><strong>开放注册</strong><small>允许新用户创建账号</small></span><input id="registrationEnabled" type="checkbox" role="switch"></label>
++        <div class="user-list" id="userList"></div>
++    </div>
++</dialog>
+ 
+ <dialog id="settingsDialog">
+     <form method="dialog" class="dialog-shell" id="cookieForm">
+diff --git a/static/web/styles.css b/static/web/styles.css
+index a4b4ff7..2e650a7 100644
+--- a/static/web/styles.css
++++ b/static/web/styles.css
+@@ -21,9 +21,25 @@
+ 
+ * { box-sizing: border-box; }
+ body { margin: 0; min-width: 320px; background: var(--bg); color: var(--text); font-size: 14px; }
+-button, input, textarea { font: inherit; letter-spacing: 0; }
++button, input, textarea, select { font: inherit; letter-spacing: 0; }
+ button { cursor: pointer; }
+ button:disabled { cursor: not-allowed; opacity: .48; }
++[hidden] { display: none !important; }
++
++.auth-view { min-height: 100vh; display: grid; grid-template-columns: minmax(280px, 1fr) minmax(360px, 520px); align-items: stretch; background: var(--surface); }
++.auth-brand { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 48px; color: white; background: #24272b; }
++.auth-brand img { border-radius: var(--radius); }
++.auth-brand h1 { margin: 0; font-size: 24px; letter-spacing: 0; }
++.auth-brand p { margin: 6px 0 0; color: #c4c8cd; }
++.auth-panel { width: min(100%, 420px); align-self: center; justify-self: center; padding: 44px 34px; }
++.auth-heading { margin-bottom: 22px; }
++.auth-heading h2 { margin: 0; font-size: 22px; letter-spacing: 0; }
++.auth-heading p { margin: 7px 0 0; color: var(--muted); }
++.auth-modes { margin-bottom: 20px; }
++.auth-form { display: grid; gap: 15px; }
++.auth-submit { width: 100%; margin-top: 3px; }
++.auth-message { min-height: 20px; margin: 14px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
++.auth-message.error { color: var(--primary); }
+ 
+ .app-header {
+     height: 70px;
+@@ -43,6 +59,8 @@ button:disabled { cursor: not-allowed; opacity: .48; }
+ .brand h1 { margin: 0; font-size: 17px; line-height: 1.25; letter-spacing: 0; }
+ .brand p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+ .header-actions { gap: 8px; }
++.account-button { width: 38px; height: 38px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: white; background: #34383d; border: 1px solid #34383d; border-radius: 50%; font-size: 13px; font-weight: 700; }
++.account-button:hover { background: #202327; }
+ .service-status { gap: 7px; color: var(--muted); font-size: 12px; margin-right: 4px; }
+ .service-status i { width: 8px; height: 8px; border-radius: 50%; background: #a8adb4; }
+ .service-status.online i { background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
+@@ -71,6 +89,8 @@ textarea:focus, input:focus { border-color: var(--info); box-shadow: 0 0 0 3px r
+ .button.primary { color: white; background: var(--primary); border-color: var(--primary); }
+ .button.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+ .button.secondary { color: #34373b; background: var(--surface); border-color: var(--line-strong); }
++.button.danger { color: var(--primary); background: var(--surface); border-color: #e9aab3; }
++.button.danger:hover { background: var(--danger-soft); }
+ .button.enhance { color: #664d03; background: #fff7d6; border-color: #e4cf83; }
+ .button.enhance:hover { background: #f8eab4; border-color: #c8ad4f; }
+ .button.secondary:hover, .icon-button:hover { background: #f0f2f4; }
+@@ -190,6 +210,25 @@ dialog::backdrop { background: rgba(22, 24, 27, .45); }
+ .dialog-heading p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+ .dialog-copy { margin: 0; color: #4e5258; line-height: 1.7; }
+ .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
++.dialog-divider { height: 1px; margin: 22px 0; background: var(--line); }
++.form-submit { width: fit-content; justify-self: end; }
++.account-actions { justify-content: flex-start; padding-top: 18px; border-top: 1px solid var(--line); }
++.admin-dialog { width: min(720px, calc(100vw - 30px)); }
++.setting-row { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 10px 0 16px; border-bottom: 1px solid var(--line); }
++.setting-row span, .setting-row strong, .setting-row small { display: block; }
++.setting-row strong { font-size: 13px; }
++.setting-row small { margin-top: 4px; color: var(--muted); font-size: 11px; }
++.setting-row input[role="switch"] { width: 36px; height: 20px; flex: 0 0 auto; accent-color: var(--success); }
++.user-list { max-height: min(52vh, 460px); overflow-y: auto; }
++.user-row { display: grid; grid-template-columns: minmax(0, 1fr) 82px 88px; align-items: center; gap: 14px; min-height: 70px; border-bottom: 1px solid var(--line); }
++.user-row:last-child { border-bottom: 0; }
++.user-identity { min-width: 0; }
++.user-identity strong, .user-identity span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.user-identity span { margin-top: 4px; color: var(--muted); font-size: 11px; }
++.role-label { width: fit-content; padding: 4px 7px; color: var(--info); background: #e9f3fb; border-radius: 4px; font-size: 11px; font-weight: 600; }
++.role-label.admin { color: var(--success); background: var(--success-soft); }
++.user-toggle { justify-self: end; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
++.user-toggle input { width: 16px; height: 16px; accent-color: var(--success); }
+ .form-grid { display: grid; gap: 15px; }
+ .text-field { display: grid; gap: 7px; color: #3b3e43; font-size: 13px; font-weight: 600; }
+ .text-field > input, .secret-field > input { width: 100%; min-width: 0; height: 42px; padding: 0 12px; color: var(--text); background: #fbfbfc; border: 1px solid var(--line-strong); border-radius: var(--radius); outline: none; }
+@@ -209,6 +248,10 @@ dialog::backdrop { background: rgba(22, 24, 27, .45); }
+ .toast.error { background: #9f1d31; }
+ 
+ @media (max-width: 760px) {
++    .auth-view { grid-template-columns: 1fr; align-content: start; }
++    .auth-brand { min-height: 150px; padding: 30px 22px; }
++    .auth-brand h1 { font-size: 20px; }
++    .auth-panel { align-self: start; padding: 30px 22px 44px; }
+     .app-header { height: 62px; padding: 0 14px; }
+     .brand img { width: 36px; height: 36px; }
+     .brand h1 { font-size: 15px; }
+@@ -238,6 +281,9 @@ dialog::backdrop { background: rgba(22, 24, 27, .45); }
+     .viewer-nav { width: 36px; height: 48px; }
+     .viewer-nav.previous { left: 6px; }
+     .viewer-nav.next { right: 6px; }
++    .user-row { grid-template-columns: minmax(0, 1fr) 72px; gap: 9px; }
++    .user-toggle { grid-column: 2; grid-row: 1; }
++    .role-label { grid-column: 1; grid-row: 2; margin-bottom: 10px; }
+ }
+ 
+ @media (max-width: 430px) {
+diff --git a/stop-web.ps1 b/stop-web.ps1
+index e06edab..59bcc1d 100644
+--- a/stop-web.ps1
++++ b/stop-web.ps1
+@@ -1,5 +1,7 @@
+ [CmdletBinding()]
+-param()
++param(
++    [int]$Port = 5557
++)
+ 
+ $ErrorActionPreference = "Stop"
+ $pidFile = Join-Path $PSScriptRoot ".install\web-server.pid"
+@@ -9,11 +11,38 @@ if (-not (Test-Path -LiteralPath $pidFile)) {
+     exit 0
+ }
+ 
+-$processId = [int](Get-Content -Raw -LiteralPath $pidFile)
+-$process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+-if ($process) {
+-    Stop-Process -Id $processId
+-    [void]$process.WaitForExit(10000)
++$recordContent = Get-Content -Raw -LiteralPath $pidFile
++try {
++    $record = $recordContent | ConvertFrom-Json
++    if ($record.PSObject.Properties.Name -contains "ProcessId") {
++        $recordedProcessId = [int]$record.ProcessId
++        $parentProcessId = [int]$record.ParentProcessId
++        $Port = [int]$record.Port
++    }
++    else {
++        $recordedProcessId = [int]$record
++        $parentProcessId = 0
++    }
++}
++catch {
++    throw "Invalid web server process record: $pidFile"
++}
++
++$processIds = @($recordedProcessId, $parentProcessId)
++$listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
++    Select-Object -First 1
++if ($listener) {
++    $processIds += [int]$listener.OwningProcess
++}
++
++$stopped = 0
++foreach ($processId in $processIds | Where-Object { $_ -gt 0 } | Select-Object -Unique) {
++    $details = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
++    if (-not $details -or $details.CommandLine -notlike "*web_app.py*") {
++        continue
++    }
++    Stop-Process -Id $processId -Force
++    $stopped += 1
+ }
+ Remove-Item -LiteralPath $pidFile -Force
+-Write-Output "XHS-Downloader Web stopped."
++Write-Output "XHS-Downloader Web stopped ($stopped processes)."
+diff --git a/tests/test_web_app.py b/tests/test_web_app.py
+index 8f63f30..56a2bf4 100644
+--- a/tests/test_web_app.py
++++ b/tests/test_web_app.py
+@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
+ from PIL import Image
+ 
+ from ai_gateway import AIConfigStore, AIGateway
++from auth import AuthStore, LoginThrottle
+ from media_enhancer import enhance_media
+ from web_app import create_app
+ 
+@@ -83,10 +84,27 @@ class WebAppTests(unittest.TestCase):
+             AIConfigStore(Path(self.temporary.name) / "ai_config.json"),
+             timeout=2,
+         )
++        self.auth_store = AuthStore(Path(self.temporary.name) / "users.db")
+         self.client_context = TestClient(
+-            create_app(runtime=self.runtime, ai_gateway=self.ai_gateway)
++            create_app(
++                runtime=self.runtime,
++                ai_gateway=self.ai_gateway,
++                auth_store=self.auth_store,
++                login_throttle=LoginThrottle(max_attempts=2, window_seconds=60),
++            )
+         )
+         self.client = self.client_context.__enter__()
++        self.registration_response = self.client.post(
++            "/api/auth/register",
++            json={
++                "email": "admin@example.com",
++                "display_name": "系统管理员",
++                "password": "AdminPass2026",
++            },
++        )
++        self.assertEqual(self.registration_response.status_code, 201)
++        self.admin_session = self.registration_response.json()
++        self.client.headers.update({"X-CSRF-Token": self.admin_session["csrf_token"]})
+ 
+     def tearDown(self):
+         self.client_context.__exit__(None, None, None)
+@@ -101,6 +119,141 @@ class WebAppTests(unittest.TestCase):
+         self.assertEqual(page.status_code, 200)
+         self.assertIn("小红书素材下载", page.text)
+ 
++    def test_registration_login_session_and_security_headers(self):
++        self.assertEqual(self.admin_session["user"]["role"], "admin")
++        cookie = self.registration_response.headers["set-cookie"].lower()
++        self.assertIn("httponly", cookie)
++        self.assertIn("samesite=strict", cookie)
++
++        anonymous = TestClient(self.client.app)
++        protected = anonymous.get("/api/state")
++        self.assertEqual(protected.status_code, 401)
++        self.assertEqual(protected.headers["x-frame-options"], "DENY")
++
++        status = anonymous.get("/api/auth/status")
++        self.assertEqual(status.status_code, 200)
++        self.assertFalse(status.json()["needs_setup"])
++        self.assertTrue(status.json()["registration_enabled"])
++
++        invalid_csrf = self.client.post(
++            "/api/tasks",
++            headers={"X-CSRF-Token": "invalid"},
++            json={"content": "https://www.xiaohongshu.com/explore/example"},
++        )
++        self.assertEqual(invalid_csrf.status_code, 403)
++
++        anonymous.post(
++            "/api/auth/login",
++            json={"email": "admin@example.com", "password": "wrong-1"},
++        )
++        anonymous.post(
++            "/api/auth/login",
++            json={"email": "admin@example.com", "password": "wrong-2"},
++        )
++        blocked = anonymous.post(
++            "/api/auth/login",
++            json={"email": "admin@example.com", "password": "AdminPass2026"},
++        )
++        self.assertEqual(blocked.status_code, 429)
++        self.assertIn("retry-after", blocked.headers)
++
++    def test_regular_user_account_lifecycle_and_admin_boundaries(self):
++        user_client = TestClient(self.client.app)
++        registered = user_client.post(
++            "/api/auth/register",
++            json={
++                "email": "member@example.com",
++                "display_name": "内容成员",
++                "password": "MemberPass2026",
++            },
++        )
++        self.assertEqual(registered.status_code, 201)
++        user_session = registered.json()
++        self.assertEqual(user_session["user"]["role"], "user")
++        user_client.headers.update({"X-CSRF-Token": user_session["csrf_token"]})
++
++        config = user_client.get("/api/ai/config")
++        self.assertFalse(config.json()["editable"])
++        self.assertNotIn("base_url", config.json())
++        forbidden = user_client.put(
++            "/api/ai/config",
++            json={"base_url": "https://example.com/v1", "model": "demo"},
++        )
++        self.assertEqual(forbidden.status_code, 403)
++
++        renamed = user_client.put(
++            "/api/auth/profile",
++            json={"display_name": "内容运营"},
++        )
++        self.assertEqual(renamed.status_code, 200)
++        self.assertEqual(renamed.json()["user"]["display_name"], "内容运营")
++
++        changed = user_client.put(
++            "/api/auth/password",
++            json={
++                "current_password": "MemberPass2026",
++                "new_password": "NewMemberPass2026",
++            },
++        )
++        self.assertEqual(changed.status_code, 200)
++        user_client.headers.update({"X-CSRF-Token": changed.json()["csrf_token"]})
++        self.assertEqual(user_client.get("/api/auth/me").status_code, 200)
++
++        user_client.post("/api/auth/logout")
++        old_password = user_client.post(
++            "/api/auth/login",
++            json={"email": "member@example.com", "password": "MemberPass2026"},
++        )
++        self.assertEqual(old_password.status_code, 401)
++        new_password = user_client.post(
++            "/api/auth/login",
++            json={
++                "email": "member@example.com",
++                "password": "NewMemberPass2026",
++            },
++        )
++        self.assertEqual(new_password.status_code, 200)
++
++    def test_admin_can_manage_registration_and_disable_users(self):
++        member = self.auth_store.register(
++            "disabled@example.com",
++            "待停用用户",
++            "DisabledPass2026",
++        )
++        users = self.client.get("/api/admin/users")
++        self.assertEqual(users.status_code, 200)
++        self.assertEqual(len(users.json()["users"]), 2)
++
++        disabled = self.client.patch(
++            f"/api/admin/users/{member['id']}",
++            json={"is_active": False},
++        )
++        self.assertEqual(disabled.status_code, 200)
++        self.assertFalse(disabled.json()["user"]["is_active"])
++        login = self.client.post(
++            "/api/auth/login",
++            json={
++                "email": "disabled@example.com",
++                "password": "DisabledPass2026",
++            },
++        )
++        self.assertEqual(login.status_code, 401)
++
++        closed = self.client.put(
++            "/api/admin/registration",
++            json={"enabled": False},
++        )
++        self.assertFalse(closed.json()["registration_enabled"])
++        rejected = TestClient(self.client.app).post(
++            "/api/auth/register",
++            json={
++                "email": "late@example.com",
++                "display_name": "迟到用户",
++                "password": "LateUserPass2026",
++            },
++        )
++        self.assertEqual(rejected.status_code, 409)
++
+     def test_task_clipboard_cookie_and_clear_endpoints(self):
+         invalid = self.client.post("/api/tasks", json={"content": "not a link"})
+         self.assertEqual(invalid.status_code, 422)
+diff --git a/web_app.py b/web_app.py
+index 775440f..cf1ccfa 100644
+--- a/web_app.py
++++ b/web_app.py
+@@ -2,8 +2,10 @@ from __future__ import annotations
+ 
+ import argparse
+ import asyncio
++import os
+ from contextlib import asynccontextmanager
+ from datetime import datetime
++from hmac import compare_digest
+ from mimetypes import guess_type
+ from pathlib import Path
+ from secrets import token_hex
+@@ -13,13 +15,24 @@ from urllib.parse import quote
+ from zipfile import ZIP_STORED, ZipFile
+ 
+ import uvicorn
+-from fastapi import FastAPI, HTTPException, Query
++from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+ from fastapi.responses import FileResponse
+ from fastapi.staticfiles import StaticFiles
+ from pydantic import BaseModel, Field
+ from starlette.background import BackgroundTask
+ 
+ from ai_gateway import AIConfigError, AIConfigStore, AIGateway, AIGatewayConnectionError
++from auth import (
++    AccountConflict,
++    AccountDisabled,
++    AdminActionError,
++    AuthError,
++    AuthStore,
++    InvalidCredentials,
++    LoginBlocked,
++    LoginThrottle,
++    RegistrationClosed,
++)
+ from media_enhancer import EnhancementManager, SUPPORTED_MEDIA_SUFFIXES
+ from source.GUI.backend import GuiBackend
+ from source.module import PROJECT, ROOT
+@@ -50,6 +63,7 @@ AI_IMAGE_TYPES = {
+ }
+ MAX_AI_IMAGE_BYTES = 8 * 1024 * 1024
+ MAX_AI_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024
++SESSION_COOKIE = "xhs_session"
+ 
+ 
+ class Runtime(Protocol):
+@@ -157,6 +171,34 @@ class AIGenerateRequest(BaseModel):
+     image_quality: Literal["low", "medium", "high"] = "low"
+ 
+ 
++class RegisterRequest(BaseModel):
++    email: Annotated[str, Field(min_length=3, max_length=254)]
++    display_name: Annotated[str, Field(min_length=2, max_length=40)]
++    password: Annotated[str, Field(min_length=10, max_length=128)]
++
++
++class LoginRequest(BaseModel):
++    email: Annotated[str, Field(min_length=3, max_length=254)]
++    password: Annotated[str, Field(min_length=1, max_length=128)]
++
++
++class ProfileRequest(BaseModel):
++    display_name: Annotated[str, Field(min_length=2, max_length=40)]
++
++
++class PasswordRequest(BaseModel):
++    current_password: Annotated[str, Field(min_length=1, max_length=128)]
++    new_password: Annotated[str, Field(min_length=10, max_length=128)]
++
++
++class UserActiveRequest(BaseModel):
++    is_active: bool
++
++
++class RegistrationSettingRequest(BaseModel):
++    enabled: bool
++
++
+ def _resolve_file(root: Path, relative_path: str) -> Path:
+     root = root.resolve()
+     target = (root / relative_path).resolve()
+@@ -234,12 +276,30 @@ def create_app(
+     web_root: Path | None = None,
+     enhancer: EnhancementManager | None = None,
+     ai_gateway: AIGateway | None = None,
++    auth_store: AuthStore | None = None,
++    login_throttle: LoginThrottle | None = None,
+ ) -> FastAPI:
+     active_runtime = runtime or DownloaderRuntime()
+     active_enhancer = enhancer or EnhancementManager()
+     active_ai_gateway = ai_gateway or AIGateway(
+-        AIConfigStore(ROOT / "Volume" / "ai_config.json")
++        AIConfigStore(
++            Path(
++                os.getenv(
++                    "XHS_AI_CONFIG_PATH",
++                    str(ROOT / "Volume" / "ai_config.json"),
++                )
++            )
++        )
+     )
++    active_auth = auth_store or AuthStore(
++        Path(
++            os.getenv(
++                "XHS_AUTH_DB_PATH",
++                str(ROOT / "Volume" / "users.db"),
++            )
++        )
++    )
++    active_login_throttle = login_throttle or LoginThrottle()
+     assets = (web_root or WEB_ROOT).resolve()
+     if not (assets / "index.html").is_file():
+         raise FileNotFoundError(f"网页入口不存在：{assets / 'index.html'}")
+@@ -253,12 +313,92 @@ def create_app(
+             await asyncio.to_thread(active_runtime.stop)
+             active_enhancer.shutdown()
+ 
+-    app = FastAPI(title=f"{PROJECT} Web", lifespan=lifespan)
++    app = FastAPI(
++        title=f"{PROJECT} Web",
++        lifespan=lifespan,
++        docs_url=None,
++        redoc_url=None,
++        openapi_url=None,
++    )
+     app.state.runtime = active_runtime
+     app.state.enhancer = active_enhancer
+     app.state.ai_gateway = active_ai_gateway
++    app.state.auth_store = active_auth
+     app.mount("/assets", StaticFiles(directory=assets), name="assets")
+ 
++    @app.middleware("http")
++    async def security_headers(request: Request, call_next):
++        response = await call_next(request)
++        response.headers.setdefault("X-Content-Type-Options", "nosniff")
++        response.headers.setdefault("X-Frame-Options", "DENY")
++        response.headers.setdefault("Referrer-Policy", "same-origin")
++        response.headers.setdefault(
++            "Content-Security-Policy",
++            "default-src 'self'; img-src 'self' data: blob:; media-src 'self'; "
++            "script-src 'self'; style-src 'self' 'unsafe-inline'; "
++            "connect-src 'self'; object-src 'none'; base-uri 'none'; "
++            "frame-ancestors 'none'",
++        )
++        if request.url.path.startswith("/api/auth"):
++            response.headers["Cache-Control"] = "no-store"
++        return response
++
++    def session_payload(user: dict, session: dict) -> dict:
++        return {
++            "user": user,
++            "csrf_token": session["csrf_token"],
++            "expires_at": session["expires_at"],
++        }
++
++    def set_session_cookie(
++        response: Response,
++        request: Request,
++        session: dict,
++    ) -> None:
++        forwarded_protocol = request.headers.get("x-forwarded-proto", "")
++        secure = (
++            os.getenv("XHS_WEB_SECURE_COOKIE", "").strip().lower()
++            in {"1", "true", "yes", "on"}
++            or request.url.scheme == "https"
++            or forwarded_protocol.split(",", 1)[0].strip().lower() == "https"
++        )
++        response.set_cookie(
++            SESSION_COOKIE,
++            session["token"],
++            max_age=active_auth.session_ttl,
++            httponly=True,
++            secure=secure,
++            samesite="strict",
++            path="/",
++        )
++
++    def require_user(request: Request) -> dict:
++        session = active_auth.session(request.cookies.get(SESSION_COOKIE, ""))
++        if not session:
++            raise HTTPException(status_code=401, detail="请先登录")
++        request.state.auth_session = session
++        return session["user"]
++
++    def require_csrf(
++        request: Request,
++        user: dict = Depends(require_user),
++    ) -> dict:
++        csrf_token = request.headers.get("x-csrf-token", "")
++        expected = request.state.auth_session["csrf_token"]
++        if not csrf_token or not compare_digest(csrf_token, expected):
++            raise HTTPException(status_code=403, detail="请求校验失败，请刷新后重试")
++        return user
++
++    def require_admin(user: dict = Depends(require_user)) -> dict:
++        if user["role"] != "admin":
++            raise HTTPException(status_code=403, detail="需要管理员权限")
++        return user
++
++    def require_admin_csrf(user: dict = Depends(require_csrf)) -> dict:
++        if user["role"] != "admin":
++            raise HTTPException(status_code=403, detail="需要管理员权限")
++        return user
++
+     @app.get("/", include_in_schema=False)
+     def index() -> FileResponse:
+         return FileResponse(assets / "index.html")
+@@ -276,46 +416,192 @@ def create_app(
+             "ai_image_configured": active_ai_gateway.public_config()[
+                 "image_configured"
+             ],
++            "authentication": "session",
++        }
++
++    @app.get("/api/auth/status")
++    def auth_status() -> dict:
++        return active_auth.status()
++
++    @app.post("/api/auth/register", status_code=201)
++    def register(
++        payload: RegisterRequest,
++        request: Request,
++        response: Response,
++    ) -> dict:
++        try:
++            user = active_auth.register(
++                payload.email,
++                payload.display_name,
++                payload.password,
++            )
++        except (AccountConflict, RegistrationClosed) as error:
++            raise HTTPException(status_code=409, detail=str(error)) from error
++        except AuthError as error:
++            raise HTTPException(status_code=422, detail=str(error)) from error
++        session = active_auth.create_session(user["id"])
++        set_session_cookie(response, request, session)
++        return session_payload(user, session)
++
++    @app.post("/api/auth/login")
++    def login(
++        payload: LoginRequest,
++        request: Request,
++        response: Response,
++    ) -> dict:
++        address = request.client.host if request.client else "unknown"
++        throttle_key = f"{address}|{payload.email.strip().casefold()}"
++        try:
++            active_login_throttle.check(throttle_key)
++        except LoginBlocked as error:
++            raise HTTPException(
++                status_code=429,
++                detail=str(error),
++                headers={"Retry-After": str(error.retry_after)},
++            ) from error
++        try:
++            user = active_auth.authenticate(payload.email, payload.password)
++        except (InvalidCredentials, AccountDisabled) as error:
++            active_login_throttle.fail(throttle_key)
++            raise HTTPException(status_code=401, detail=str(error)) from error
++        active_login_throttle.success(throttle_key)
++        session = active_auth.create_session(user["id"])
++        set_session_cookie(response, request, session)
++        return session_payload(user, session)
++
++    @app.get("/api/auth/me")
++    def current_account(
++        request: Request,
++        user: dict = Depends(require_user),
++    ) -> dict:
++        return session_payload(user, request.state.auth_session)
++
++    @app.post("/api/auth/logout")
++    def logout(
++        request: Request,
++        response: Response,
++        _user: dict = Depends(require_csrf),
++    ) -> dict:
++        active_auth.delete_session(request.cookies.get(SESSION_COOKIE, ""))
++        response.delete_cookie(SESSION_COOKIE, path="/", samesite="strict")
++        return {"ok": True}
++
++    @app.put("/api/auth/profile")
++    def update_profile(
++        payload: ProfileRequest,
++        user: dict = Depends(require_csrf),
++    ) -> dict:
++        try:
++            updated = active_auth.update_profile(user["id"], payload.display_name)
++        except AuthError as error:
++            raise HTTPException(status_code=422, detail=str(error)) from error
++        return {"ok": True, "user": updated}
++
++    @app.put("/api/auth/password")
++    def update_password(
++        payload: PasswordRequest,
++        request: Request,
++        response: Response,
++        user: dict = Depends(require_csrf),
++    ) -> dict:
++        try:
++            active_auth.change_password(
++                user["id"],
++                payload.current_password,
++                payload.new_password,
++            )
++        except InvalidCredentials as error:
++            raise HTTPException(status_code=401, detail=str(error)) from error
++        except AuthError as error:
++            raise HTTPException(status_code=422, detail=str(error)) from error
++        session = active_auth.create_session(user["id"])
++        set_session_cookie(response, request, session)
++        return session_payload(active_auth.get_user(user["id"]), session)
++
++    @app.get("/api/admin/users")
++    def users(_admin: dict = Depends(require_admin)) -> dict:
++        return {
++            "users": active_auth.list_users(),
++            "registration_enabled": active_auth.registration_enabled(),
++        }
++
++    @app.patch("/api/admin/users/{user_id}")
++    def update_user_status(
++        user_id: str,
++        payload: UserActiveRequest,
++        admin: dict = Depends(require_admin_csrf),
++    ) -> dict:
++        try:
++            user = active_auth.set_user_active(
++                user_id,
++                payload.is_active,
++                admin["id"],
++            )
++        except AdminActionError as error:
++            raise HTTPException(status_code=409, detail=str(error)) from error
++        except AuthError as error:
++            raise HTTPException(status_code=404, detail=str(error)) from error
++        return {"ok": True, "user": user}
++
++    @app.put("/api/admin/registration")
++    def update_registration(
++        payload: RegistrationSettingRequest,
++        _admin: dict = Depends(require_admin_csrf),
++    ) -> dict:
++        return {
++            "ok": True,
++            "registration_enabled": active_auth.set_registration_enabled(
++                payload.enabled
++            ),
+         }
+ 
+     @app.get("/api/state")
+-    def state() -> dict:
++    def state(_user: dict = Depends(require_user)) -> dict:
+         return active_runtime.snapshot()
+ 
+     @app.post("/api/tasks", status_code=202)
+-    def create_tasks(request: TaskRequest) -> dict:
++    def create_tasks(
++        request: TaskRequest,
++        _user: dict = Depends(require_csrf),
++    ) -> dict:
+         created = active_runtime.create_tasks(request.content.strip(), request.index)
+         if not created:
+             raise HTTPException(status_code=422, detail="没有识别到有效的小红书链接")
+         return {"tasks": created}
+ 
+     @app.delete("/api/tasks/{task_id}")
+-    def cancel_task(task_id: str) -> dict:
++    def cancel_task(
++        task_id: str,
++        _user: dict = Depends(require_csrf),
++    ) -> dict:
+         if not active_runtime.cancel_task(task_id):
+             raise HTTPException(status_code=409, detail="任务已开始或不存在")
+         return {"ok": True}
+ 
+     @app.delete("/api/tasks")
+-    def clear_finished() -> dict:
++    def clear_finished(_user: dict = Depends(require_csrf)) -> dict:
+         return {"removed": active_runtime.clear_finished()}
+ 
+     @app.post("/api/clipboard")
+-    def clipboard() -> dict:
++    def clipboard(_user: dict = Depends(require_csrf)) -> dict:
+         return {"content": active_runtime.paste_content()}
+ 
+     @app.post("/api/disclaimer/accept")
+-    def accept_disclaimer() -> dict:
++    def accept_disclaimer(_user: dict = Depends(require_csrf)) -> dict:
+         return active_runtime.accept_disclaimer()
+ 
+     @app.put("/api/settings/cookie")
+-    def save_cookie(request: CookieRequest) -> dict:
++    def save_cookie(
++        request: CookieRequest,
++        _admin: dict = Depends(require_admin_csrf),
++    ) -> dict:
+         result = active_runtime.save_cookie(request.cookie.strip())
+         if not result.get("ok"):
+             raise HTTPException(status_code=409, detail=result.get("error", "保存失败"))
+         return {"ok": True, "cookie_configured": bool(request.cookie.strip())}
+ 
+     @app.post("/api/folder/open")
+-    def open_folder() -> dict:
++    def open_folder(_admin: dict = Depends(require_admin_csrf)) -> dict:
+         if not active_runtime.open_download_folder():
+             raise HTTPException(status_code=500, detail="无法打开下载目录")
+         return {"ok": True}
+@@ -323,15 +609,32 @@ def create_app(
+     @app.get("/api/library")
+     def library(
+         limit: Annotated[int, Query(ge=1, le=1000)] = 300,
++        _user: dict = Depends(require_user),
+     ) -> dict:
+         return _library(active_runtime, limit)
+ 
+     @app.get("/api/ai/config")
+-    def ai_config() -> dict:
+-        return active_ai_gateway.public_config()
++    def ai_config(user: dict = Depends(require_user)) -> dict:
++        config = active_ai_gateway.public_config()
++        if user["role"] == "admin":
++            return {**config, "managed": True, "editable": True}
++        return {
++            key: config[key]
++            for key in (
++                "model",
++                "image_model",
++                "protocol",
++                "api_key_configured",
++                "configured",
++                "image_configured",
++            )
++        } | {"managed": True, "editable": False}
+ 
+     @app.put("/api/ai/config")
+-    def save_ai_config(request: AIConfigRequest) -> dict:
++    def save_ai_config(
++        request: AIConfigRequest,
++        _admin: dict = Depends(require_admin_csrf),
++    ) -> dict:
+         try:
+             config = active_ai_gateway.configure(
+                 request.base_url,
+@@ -346,7 +649,7 @@ def create_app(
+         return {"ok": True, "config": config}
+ 
+     @app.post("/api/ai/test")
+-    def test_ai_connection() -> dict:
++    def test_ai_connection(_admin: dict = Depends(require_admin_csrf)) -> dict:
+         try:
+             return active_ai_gateway.test_connection()
+         except AIConfigError as error:
+@@ -355,7 +658,10 @@ def create_app(
+             raise HTTPException(status_code=502, detail=str(error)) from error
+ 
+     @app.post("/api/ai/generate")
+-    def generate_ai_content(request: AIGenerateRequest) -> dict:
++    def generate_ai_content(
++        request: AIGenerateRequest,
++        _user: dict = Depends(require_csrf),
++    ) -> dict:
+         if request.generate_image and request.mode != "create":
+             raise HTTPException(status_code=422, detail="只有图文创作模式会生成图片")
+         root = active_runtime.download_root()
+@@ -438,11 +744,14 @@ def create_app(
+         return result
+ 
+     @app.get("/api/enhancements")
+-    def enhancements() -> dict:
++    def enhancements(_user: dict = Depends(require_user)) -> dict:
+         return {"tasks": active_enhancer.snapshot()}
+ 
+     @app.post("/api/enhancements", status_code=202)
+-    def create_enhancement(request: EnhancementRequest) -> dict:
++    def create_enhancement(
++        request: EnhancementRequest,
++        _user: dict = Depends(require_csrf),
++    ) -> dict:
+         root = active_runtime.download_root()
+         selected = [
+             _resolve_file(root, value) for value in dict.fromkeys(request.paths)
+@@ -460,12 +769,18 @@ def create_app(
+         return {"task": active_enhancer.submit(root, selected)}
+ 
+     @app.get("/files/{relative_path:path}", name="download_file")
+-    def download_file(relative_path: str) -> FileResponse:
++    def download_file(
++        relative_path: str,
++        _user: dict = Depends(require_user),
++    ) -> FileResponse:
+         target = _resolve_file(active_runtime.download_root(), relative_path)
+         return FileResponse(target, filename=target.name)
+ 
+     @app.get("/media/{relative_path:path}", name="preview_media")
+-    def preview_media(relative_path: str) -> FileResponse:
++    def preview_media(
++        relative_path: str,
++        _user: dict = Depends(require_user),
++    ) -> FileResponse:
+         target = _resolve_file(active_runtime.download_root(), relative_path)
+         if target.suffix.lower() not in IMAGE_SUFFIXES | VIDEO_SUFFIXES:
+             raise HTTPException(status_code=415, detail="文件不支持预览")
+@@ -477,7 +792,10 @@ def create_app(
+         )
+ 
+     @app.post("/api/archive")
+-    def archive(request: ArchiveRequest) -> FileResponse:
++    def archive(
++        request: ArchiveRequest,
++        _user: dict = Depends(require_csrf),
++    ) -> FileResponse:
+         root = active_runtime.download_root()
+         selected = [
+             _resolve_file(root, value) for value in dict.fromkeys(request.paths)

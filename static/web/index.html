@@ -9,6 +9,29 @@
     <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
+<section class="auth-view" id="authView" aria-labelledby="authTitle">
+    <div class="auth-brand">
+        <img src="/assets/logo.png" alt="" width="54" height="54">
+        <div><h1>小红书素材下载</h1><p>团队内容工作台</p></div>
+    </div>
+    <div class="auth-panel">
+        <div class="auth-heading"><h2 id="authTitle">登录账号</h2><p id="authSubtitle">使用你的账号进入工作台</p></div>
+        <div class="segmented-control auth-modes" id="authModes">
+            <label><input type="radio" name="authMode" value="login" checked><span>登录</span></label>
+            <label id="registerModeLabel"><input type="radio" name="authMode" value="register"><span>注册</span></label>
+        </div>
+        <form class="auth-form" id="authForm">
+            <label class="text-field" id="displayNameField" for="authDisplayName" hidden><span>昵称</span><input id="authDisplayName" type="text" minlength="2" maxlength="40" autocomplete="name" placeholder="你的称呼"></label>
+            <label class="text-field" for="authEmail"><span>邮箱</span><input id="authEmail" type="email" maxlength="254" autocomplete="email" placeholder="name@example.com" required></label>
+            <label class="text-field" for="authPassword"><span>密码</span><input id="authPassword" type="password" minlength="10" maxlength="128" autocomplete="current-password" placeholder="输入密码" required></label>
+            <label class="text-field" id="confirmPasswordField" for="authConfirmPassword" hidden><span>确认密码</span><input id="authConfirmPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" placeholder="再次输入密码"></label>
+            <button class="button primary auth-submit" id="authSubmitButton" type="submit"><i data-lucide="log-in"></i><span>登录</span></button>
+        </form>
+        <p class="auth-message" id="authMessage" role="status"></p>
+    </div>
+</section>
+
+<div id="appView" hidden>
 <header class="app-header">
     <div class="brand">
         <img src="/assets/logo.png" alt="" width="42" height="42">
@@ -16,15 +39,19 @@
     </div>
     <div class="header-actions">
         <span class="service-status" id="serviceStatus"><i></i><span>正在连接</span></span>
-        <button class="icon-button" id="aiSettingsButton" type="button" title="AI 中转设置" aria-label="AI 中转设置">
+        <button class="icon-button" id="adminUsersButton" type="button" title="用户管理" aria-label="用户管理" hidden>
+            <i data-lucide="users"></i>
+        </button>
+        <button class="icon-button" id="aiSettingsButton" type="button" title="AI 中转设置" aria-label="AI 中转设置" hidden>
             <i data-lucide="bot"></i>
         </button>
-        <button class="icon-button" id="settingsButton" type="button" title="Cookie 设置" aria-label="Cookie 设置">
+        <button class="icon-button" id="settingsButton" type="button" title="Cookie 设置" aria-label="Cookie 设置" hidden>
             <i data-lucide="settings-2"></i>
         </button>
-        <button class="icon-button" id="openFolderButton" type="button" title="打开下载目录" aria-label="打开下载目录">
+        <button class="icon-button" id="openFolderButton" type="button" title="打开下载目录" aria-label="打开下载目录" hidden>
             <i data-lucide="folder-open"></i>
         </button>
+        <button class="account-button" id="accountButton" type="button" title="账号中心" aria-label="账号中心"><span id="accountInitial">用</span></button>
     </div>
 </header>
 
@@ -112,6 +139,33 @@
         </div>
     </section>
 </main>
+</div>
+
+<dialog id="accountDialog">
+    <div class="dialog-shell">
+        <div class="dialog-heading"><div><h2>账号中心</h2><p id="accountMeta"></p></div><button class="icon-button subtle dialog-close" type="button" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <form class="form-grid" id="profileForm">
+            <label class="text-field" for="profileDisplayName"><span>昵称</span><input id="profileDisplayName" type="text" minlength="2" maxlength="40" autocomplete="name" required></label>
+            <button class="button secondary form-submit" type="submit"><i data-lucide="save"></i>更新昵称</button>
+        </form>
+        <div class="dialog-divider"></div>
+        <form class="form-grid" id="passwordForm">
+            <label class="text-field" for="currentPassword"><span>当前密码</span><input id="currentPassword" type="password" maxlength="128" autocomplete="current-password" required></label>
+            <label class="text-field" for="newPassword"><span>新密码</span><input id="newPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></label>
+            <label class="text-field" for="confirmNewPassword"><span>确认新密码</span><input id="confirmNewPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></label>
+            <button class="button secondary form-submit" type="submit"><i data-lucide="key-round"></i>更新密码</button>
+        </form>
+        <div class="dialog-actions account-actions"><button class="button danger" id="logoutButton" type="button"><i data-lucide="log-out"></i>退出登录</button></div>
+    </div>
+</dialog>
+
+<dialog id="adminUsersDialog" class="admin-dialog">
+    <div class="dialog-shell">
+        <div class="dialog-heading"><div><h2>用户管理</h2><p id="userSummary">正在读取用户</p></div><button class="icon-button subtle dialog-close" type="button" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <label class="setting-row" for="registrationEnabled"><span><strong>开放注册</strong><small>允许新用户创建账号</small></span><input id="registrationEnabled" type="checkbox" role="switch"></label>
+        <div class="user-list" id="userList"></div>
+    </div>
+</dialog>
 
 <dialog id="settingsDialog">
     <form method="dialog" class="dialog-shell" id="cookieForm">

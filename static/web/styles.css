@@ -21,9 +21,25 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; background: var(--bg); color: var(--text); font-size: 14px; }
-button, input, textarea { font: inherit; letter-spacing: 0; }
+button, input, textarea, select { font: inherit; letter-spacing: 0; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .48; }
+[hidden] { display: none !important; }
+
+.auth-view { min-height: 100vh; display: grid; grid-template-columns: minmax(280px, 1fr) minmax(360px, 520px); align-items: stretch; background: var(--surface); }
+.auth-brand { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 48px; color: white; background: #24272b; }
+.auth-brand img { border-radius: var(--radius); }
+.auth-brand h1 { margin: 0; font-size: 24px; letter-spacing: 0; }
+.auth-brand p { margin: 6px 0 0; color: #c4c8cd; }
+.auth-panel { width: min(100%, 420px); align-self: center; justify-self: center; padding: 44px 34px; }
+.auth-heading { margin-bottom: 22px; }
+.auth-heading h2 { margin: 0; font-size: 22px; letter-spacing: 0; }
+.auth-heading p { margin: 7px 0 0; color: var(--muted); }
+.auth-modes { margin-bottom: 20px; }
+.auth-form { display: grid; gap: 15px; }
+.auth-submit { width: 100%; margin-top: 3px; }
+.auth-message { min-height: 20px; margin: 14px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.auth-message.error { color: var(--primary); }
 
 .app-header {
     height: 70px;
@@ -43,6 +59,8 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .brand h1 { margin: 0; font-size: 17px; line-height: 1.25; letter-spacing: 0; }
 .brand p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
 .header-actions { gap: 8px; }
+.account-button { width: 38px; height: 38px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: white; background: #34383d; border: 1px solid #34383d; border-radius: 50%; font-size: 13px; font-weight: 700; }
+.account-button:hover { background: #202327; }
 .service-status { gap: 7px; color: var(--muted); font-size: 12px; margin-right: 4px; }
 .service-status i { width: 8px; height: 8px; border-radius: 50%; background: #a8adb4; }
 .service-status.online i { background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
@@ -71,6 +89,8 @@ textarea:focus, input:focus { border-color: var(--info); box-shadow: 0 0 0 3px r
 .button.primary { color: white; background: var(--primary); border-color: var(--primary); }
 .button.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
 .button.secondary { color: #34373b; background: var(--surface); border-color: var(--line-strong); }
+.button.danger { color: var(--primary); background: var(--surface); border-color: #e9aab3; }
+.button.danger:hover { background: var(--danger-soft); }
 .button.enhance { color: #664d03; background: #fff7d6; border-color: #e4cf83; }
 .button.enhance:hover { background: #f8eab4; border-color: #c8ad4f; }
 .button.secondary:hover, .icon-button:hover { background: #f0f2f4; }
@@ -190,6 +210,25 @@ dialog::backdrop { background: rgba(22, 24, 27, .45); }
 .dialog-heading p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
 .dialog-copy { margin: 0; color: #4e5258; line-height: 1.7; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.dialog-divider { height: 1px; margin: 22px 0; background: var(--line); }
+.form-submit { width: fit-content; justify-self: end; }
+.account-actions { justify-content: flex-start; padding-top: 18px; border-top: 1px solid var(--line); }
+.admin-dialog { width: min(720px, calc(100vw - 30px)); }
+.setting-row { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 10px 0 16px; border-bottom: 1px solid var(--line); }
+.setting-row span, .setting-row strong, .setting-row small { display: block; }
+.setting-row strong { font-size: 13px; }
+.setting-row small { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.setting-row input[role="switch"] { width: 36px; height: 20px; flex: 0 0 auto; accent-color: var(--success); }
+.user-list { max-height: min(52vh, 460px); overflow-y: auto; }
+.user-row { display: grid; grid-template-columns: minmax(0, 1fr) 82px 88px; align-items: center; gap: 14px; min-height: 70px; border-bottom: 1px solid var(--line); }
+.user-row:last-child { border-bottom: 0; }
+.user-identity { min-width: 0; }
+.user-identity strong, .user-identity span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.user-identity span { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.role-label { width: fit-content; padding: 4px 7px; color: var(--info); background: #e9f3fb; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.role-label.admin { color: var(--success); background: var(--success-soft); }
+.user-toggle { justify-self: end; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.user-toggle input { width: 16px; height: 16px; accent-color: var(--success); }
 .form-grid { display: grid; gap: 15px; }
 .text-field { display: grid; gap: 7px; color: #3b3e43; font-size: 13px; font-weight: 600; }
 .text-field > input, .secret-field > input { width: 100%; min-width: 0; height: 42px; padding: 0 12px; color: var(--text); background: #fbfbfc; border: 1px solid var(--line-strong); border-radius: var(--radius); outline: none; }
@@ -209,6 +248,10 @@ dialog::backdrop { background: rgba(22, 24, 27, .45); }
 .toast.error { background: #9f1d31; }
 
 @media (max-width: 760px) {
+    .auth-view { grid-template-columns: 1fr; align-content: start; }
+    .auth-brand { min-height: 150px; padding: 30px 22px; }
+    .auth-brand h1 { font-size: 20px; }
+    .auth-panel { align-self: start; padding: 30px 22px 44px; }
     .app-header { height: 62px; padding: 0 14px; }
     .brand img { width: 36px; height: 36px; }
     .brand h1 { font-size: 15px; }
@@ -238,6 +281,9 @@ dialog::backdrop { background: rgba(22, 24, 27, .45); }
     .viewer-nav { width: 36px; height: 48px; }
     .viewer-nav.previous { left: 6px; }
     .viewer-nav.next { right: 6px; }
+    .user-row { grid-template-columns: minmax(0, 1fr) 72px; gap: 9px; }
+    .user-toggle { grid-column: 2; grid-row: 1; }
+    .role-label { grid-column: 1; grid-row: 2; margin-bottom: 10px; }
 }
 
 @media (max-width: 430px) {

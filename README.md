@@ -101,6 +101,14 @@
 <li>运行 <code>uv run main.py</code> 命令启动 XHS-Downloader</li>
 </ol>
 </ol>
+<h2>🌐 多用户 Web 工作台</h2>
+<ol>
+<li>运行 <code>.\start-web.ps1</code>，浏览器打开 <code>http://127.0.0.1:5557</code></li>
+<li>首次注册的账号自动成为管理员；后续账号为普通用户</li>
+<li>管理员可在“用户管理”中启停账号或关闭开放注册</li>
+<li>管理员在“AI 中转设置”中保存 Base URL、API Key 和模型；普通用户的 AI 请求统一通过该服务端中转配置</li>
+</ol>
+<p>账号、会话与 AI 密钥保存在 <code>Volume</code> 目录，不会提交到 Git。可通过 <code>XHS_AUTH_DB_PATH</code> 和 <code>XHS_AI_CONFIG_PATH</code> 指定存储位置。对外提供服务时，可运行 <code>.\start-web.ps1 -BindHost 0.0.0.0 -NoBrowser</code>，并使用 HTTPS 反向代理；同时设置环境变量 <code>XHS_WEB_SECURE_COOKIE=true</code>。</p>
 <h2>⌨️ Docker 运行</h2>
 <ol>
 <li>获取镜像</li>

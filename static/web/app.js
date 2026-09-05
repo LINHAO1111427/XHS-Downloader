@@ -1,6 +1,22 @@
 const byId = (id) => document.getElementById(id);
 
 const elements = {
+    authView: byId("authView"),
+    appView: byId("appView"),
+    authTitle: byId("authTitle"),
+    authSubtitle: byId("authSubtitle"),
+    authModes: byId("authModes"),
+    authModeInputs: document.querySelectorAll('input[name="authMode"]'),
+    registerModeLabel: byId("registerModeLabel"),
+    authForm: byId("authForm"),
+    displayNameField: byId("displayNameField"),
+    authDisplayName: byId("authDisplayName"),
+    authEmail: byId("authEmail"),
+    authPassword: byId("authPassword"),
+    confirmPasswordField: byId("confirmPasswordField"),
+    authConfirmPassword: byId("authConfirmPassword"),
+    authSubmitButton: byId("authSubmitButton"),
+    authMessage: byId("authMessage"),
     serviceStatus: byId("serviceStatus"),
     downloadRoot: byId("downloadRoot"),
     urlInput: byId("urlInput"),
@@ -39,6 +55,22 @@ const elements = {
     generatedImagePreview: byId("generatedImagePreview"),
     generatedImageDownload: byId("generatedImageDownload"),
     aiSettingsButton: byId("aiSettingsButton"),
+    adminUsersButton: byId("adminUsersButton"),
+    adminUsersDialog: byId("adminUsersDialog"),
+    userSummary: byId("userSummary"),
+    registrationEnabled: byId("registrationEnabled"),
+    userList: byId("userList"),
+    accountButton: byId("accountButton"),
+    accountInitial: byId("accountInitial"),
+    accountDialog: byId("accountDialog"),
+    accountMeta: byId("accountMeta"),
+    profileForm: byId("profileForm"),
+    profileDisplayName: byId("profileDisplayName"),
+    passwordForm: byId("passwordForm"),
+    currentPassword: byId("currentPassword"),
+    newPassword: byId("newPassword"),
+    confirmNewPassword: byId("confirmNewPassword"),
+    logoutButton: byId("logoutButton"),
     aiSettingsDialog: byId("aiSettingsDialog"),
     aiSettingsForm: byId("aiSettingsForm"),
     aiConfigState: byId("aiConfigState"),
@@ -85,20 +117,41 @@ let toastTimer = null;
 let previousTaskFingerprint = "";
 let previousEnhancementFingerprint = "";
 let currentMediaIndex = -1;
+let currentUser = null;
+let csrfToken = "";
+let authStatus = { needs_setup: false, registration_enabled: true };
+let pollTimers = [];
+let authGeneration = 0;
 
 function refreshIcons() {
     if (window.lucide) window.lucide.createIcons({ attrs: { "stroke-width": 1.8 } });
 }
 
+class APIError extends Error {
+    constructor(message, status) {
+        super(message);
+        this.status = status;
+    }
+}
+
 async function api(path, options = {}) {
+    const requestGeneration = authGeneration;
+    const method = (options.method || "GET").toUpperCase();
+    const headers = { ...(options.headers || {}) };
+    if (options.body !== undefined) headers["Content-Type"] = "application/json";
+    if (!new Set(["GET", "HEAD", "OPTIONS"]).has(method) && csrfToken) {
+        headers["X-CSRF-Token"] = csrfToken;
+    }
     const response = await fetch(path, {
         ...options,
-        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        credentials: "same-origin",
+        headers,
     });
     if (!response.ok) {
         let message = `请求失败 (${response.status})`;
         try { message = (await response.json()).detail || message; } catch (_) { /* no-op */ }
-        throw new Error(message);
+        if (response.status === 401 && !path.startsWith("/api/auth/") && requestGeneration === authGeneration) showAuth();
+        throw new APIError(message, response.status);
     }
     return response.status === 204 ? null : response.json();
 }
@@ -108,6 +161,239 @@ function showToast(message, error = false) {
     elements.toast.textContent = message;
     elements.toast.className = `toast show${error ? " error" : ""}`;
     toastTimer = setTimeout(() => { elements.toast.className = "toast"; }, 3200);
+}
+
+function authMode() {
+    return [...elements.authModeInputs].find((input) => input.checked)?.value || "login";
+}
+
+function renderAuthMode() {
+    let mode = authMode();
+    if (mode === "register" && !authStatus.registration_enabled) {
+        elements.authModeInputs[0].checked = true;
+        mode = "login";
+    }
+    const registering = mode === "register";
+    elements.displayNameField.hidden = !registering;
+    elements.confirmPasswordField.hidden = !registering;
+    elements.authDisplayName.required = registering;
+    elements.authConfirmPassword.required = registering;
+    elements.authPassword.autocomplete = registering ? "new-password" : "current-password";
+    elements.authTitle.textContent = registering ? (authStatus.needs_setup ? "创建管理员账号" : "创建账号") : "登录账号";
+    elements.authSubtitle.textContent = registering ? "填写账号信息后进入工作台" : "使用你的账号进入工作台";
+    elements.authSubmitButton.lastElementChild.textContent = registering ? "注册并进入" : "登录";
+    elements.authSubmitButton.firstElementChild.setAttribute("data-lucide", registering ? "user-plus" : "log-in");
+    elements.authMessage.textContent = authStatus.needs_setup && registering ? "首个注册账号将成为系统管理员" : "";
+    elements.authMessage.classList.remove("error");
+    refreshIcons();
+}
+
+function stopPolling() {
+    pollTimers.forEach((timer) => clearInterval(timer));
+    pollTimers = [];
+}
+
+function showAuth(message = "") {
+    authGeneration += 1;
+    stopPolling();
+    currentUser = null;
+    csrfToken = "";
+    elements.appView.hidden = true;
+    elements.authView.hidden = false;
+    elements.authPassword.value = "";
+    elements.authConfirmPassword.value = "";
+    if (message) {
+        elements.authMessage.textContent = message;
+        elements.authMessage.classList.add("error");
+    }
+    elements.authEmail.focus();
+}
+
+function renderCurrentUser() {
+    const admin = currentUser?.role === "admin";
+    const firstCharacter = Array.from(currentUser?.display_name || "用户")[0] || "用";
+    elements.accountInitial.textContent = firstCharacter.toLocaleUpperCase();
+    elements.accountMeta.textContent = `${currentUser.email} · ${admin ? "管理员" : "普通用户"}`;
+    elements.profileDisplayName.value = currentUser.display_name;
+    elements.adminUsersButton.hidden = !admin;
+    elements.aiSettingsButton.hidden = !admin;
+    elements.settingsButton.hidden = !admin;
+    elements.openFolderButton.hidden = !admin;
+}
+
+async function enterWorkspace(session) {
+    authGeneration += 1;
+    currentUser = session.user;
+    csrfToken = session.csrf_token;
+    elements.authView.hidden = true;
+    elements.appView.hidden = false;
+    renderCurrentUser();
+    refreshIcons();
+    stopPolling();
+    try {
+        await Promise.all([refreshState(), refreshLibrary(), refreshEnhancements(), loadAIConfig()]);
+    } catch (error) {
+        if (error.status !== 401) showToast(error.message, true);
+    }
+    if (!currentUser) return;
+    pollTimers = [
+        setInterval(refreshState, 1000),
+        setInterval(refreshEnhancements, 1000),
+        setInterval(refreshLibrary, 5000),
+    ];
+}
+
+async function bootstrapAuthentication() {
+    try {
+        authStatus = await api("/api/auth/status");
+    } catch (error) {
+        showAuth("服务暂时不可用，请稍后重试");
+        return;
+    }
+    elements.registerModeLabel.hidden = !authStatus.registration_enabled;
+    if (authStatus.needs_setup) {
+        elements.authModeInputs.forEach((input) => { input.checked = input.value === "register"; });
+    }
+    renderAuthMode();
+    try {
+        await enterWorkspace(await api("/api/auth/me"));
+    } catch (error) {
+        if (error.status !== 401) showAuth(error.message);
+        else showAuth();
+    }
+}
+
+async function submitAuthentication(event) {
+    event.preventDefault();
+    const registering = authMode() === "register";
+    if (registering && elements.authPassword.value !== elements.authConfirmPassword.value) {
+        elements.authMessage.textContent = "两次输入的密码不一致";
+        elements.authMessage.classList.add("error");
+        elements.authConfirmPassword.focus();
+        return;
+    }
+    elements.authSubmitButton.disabled = true;
+    elements.authMessage.textContent = registering ? "正在创建账号" : "正在登录";
+    elements.authMessage.classList.remove("error");
+    const payload = {
+        email: elements.authEmail.value.trim(),
+        password: elements.authPassword.value,
+    };
+    if (registering) payload.display_name = elements.authDisplayName.value.trim();
+    try {
+        const session = await api(registering ? "/api/auth/register" : "/api/auth/login", {
+            method: "POST",
+            body: JSON.stringify(payload),
+        });
+        authStatus.needs_setup = false;
+        elements.authForm.reset();
+        await enterWorkspace(session);
+    } catch (error) {
+        elements.authMessage.textContent = error.message;
+        elements.authMessage.classList.add("error");
+    } finally {
+        elements.authSubmitButton.disabled = false;
+    }
+}
+
+function accountTime(value) {
+    return value ? formatTime(value) : "尚未登录";
+}
+
+function renderUsers(users) {
+    elements.userList.replaceChildren();
+    elements.userSummary.textContent = `${users.length} 个账号`;
+    users.forEach((user) => {
+        const row = document.createElement("div");
+        row.className = "user-row";
+
+        const identity = document.createElement("div");
+        identity.className = "user-identity";
+        const name = document.createElement("strong");
+        name.textContent = user.display_name;
+        const details = document.createElement("span");
+        details.textContent = `${user.email} · 最近登录 ${accountTime(user.last_login_at)}`;
+        identity.append(name, details);
+
+        const role = document.createElement("span");
+        role.className = `role-label${user.role === "admin" ? " admin" : ""}`;
+        role.textContent = user.role === "admin" ? "管理员" : "普通用户";
+
+        const toggle = document.createElement("label");
+        toggle.className = "user-toggle";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = user.is_active;
+        checkbox.disabled = user.id === currentUser.id;
+        const label = document.createElement("span");
+        label.textContent = user.is_active ? "已启用" : "已停用";
+        checkbox.addEventListener("change", async () => {
+            checkbox.disabled = true;
+            try {
+                await api(`/api/admin/users/${encodeURIComponent(user.id)}`, {
+                    method: "PATCH",
+                    body: JSON.stringify({ is_active: checkbox.checked }),
+                });
+                await loadUsers();
+                showToast(checkbox.checked ? "账号已启用" : "账号已停用");
+            } catch (error) {
+                checkbox.checked = !checkbox.checked;
+                checkbox.disabled = false;
+                showToast(error.message, true);
+            }
+        });
+        toggle.append(checkbox, label);
+        row.append(identity, role, toggle);
+        elements.userList.append(row);
+    });
+}
+
+async function loadUsers() {
+    const result = await api("/api/admin/users");
+    elements.registrationEnabled.checked = result.registration_enabled;
+    renderUsers(result.users);
+}
+
+async function saveProfile(event) {
+    event.preventDefault();
+    try {
+        const result = await api("/api/auth/profile", {
+            method: "PUT",
+            body: JSON.stringify({ display_name: elements.profileDisplayName.value.trim() }),
+        });
+        currentUser = result.user;
+        renderCurrentUser();
+        showToast("昵称已更新");
+    } catch (error) { showToast(error.message, true); }
+}
+
+async function savePassword(event) {
+    event.preventDefault();
+    if (elements.newPassword.value !== elements.confirmNewPassword.value) {
+        showToast("两次输入的新密码不一致", true);
+        elements.confirmNewPassword.focus();
+        return;
+    }
+    try {
+        const session = await api("/api/auth/password", {
+            method: "PUT",
+            body: JSON.stringify({
+                current_password: elements.currentPassword.value,
+                new_password: elements.newPassword.value,
+            }),
+        });
+        csrfToken = session.csrf_token;
+        currentUser = session.user;
+        elements.passwordForm.reset();
+        showToast("密码已更新，其他会话已退出");
+    } catch (error) { showToast(error.message, true); }
+}
+
+async function logout() {
+    stopPolling();
+    try { await api("/api/auth/logout", { method: "POST" }); } catch (_) { /* clear local session */ }
+    elements.accountDialog.close();
+    showAuth();
 }
 
 function formatBytes(value) {
@@ -665,6 +951,39 @@ async function testAIConnection() {
     }
 }
 
+elements.authModeInputs.forEach((input) => input.addEventListener("change", renderAuthMode));
+elements.authForm.addEventListener("submit", submitAuthentication);
+elements.accountButton.addEventListener("click", () => {
+    renderCurrentUser();
+    elements.accountDialog.showModal();
+});
+elements.profileForm.addEventListener("submit", saveProfile);
+elements.passwordForm.addEventListener("submit", savePassword);
+elements.logoutButton.addEventListener("click", logout);
+elements.adminUsersButton.addEventListener("click", async () => {
+    elements.adminUsersDialog.showModal();
+    try { await loadUsers(); } catch (error) { showToast(error.message, true); }
+});
+elements.registrationEnabled.addEventListener("change", async () => {
+    elements.registrationEnabled.disabled = true;
+    try {
+        const result = await api("/api/admin/registration", {
+            method: "PUT",
+            body: JSON.stringify({ enabled: elements.registrationEnabled.checked }),
+        });
+        authStatus.registration_enabled = result.registration_enabled;
+        showToast(result.registration_enabled ? "已开放用户注册" : "已关闭用户注册");
+    } catch (error) {
+        elements.registrationEnabled.checked = !elements.registrationEnabled.checked;
+        showToast(error.message, true);
+    } finally {
+        elements.registrationEnabled.disabled = false;
+    }
+});
+document.querySelectorAll(".dialog-close").forEach((button) => {
+    button.addEventListener("click", () => button.closest("dialog").close());
+});
+
 elements.pasteButton.addEventListener("click", pasteLink);
 elements.clearInputButton.addEventListener("click", () => { elements.urlInput.value = ""; elements.urlInput.focus(); });
 elements.downloadButton.addEventListener("click", createDownload);
@@ -749,8 +1068,4 @@ elements.acceptDisclaimerButton.addEventListener("click", async () => {
 
 syncAIGenerationMode();
 refreshIcons();
-Promise.all([refreshState(), refreshLibrary(), refreshEnhancements(), loadAIConfig()]).finally(() => {
-    setInterval(refreshState, 1000);
-    setInterval(refreshEnhancements, 1000);
-    setInterval(refreshLibrary, 5000);
-});
+bootstrapAuthentication();
