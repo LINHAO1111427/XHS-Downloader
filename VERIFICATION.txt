@@ -1,0 +1,74 @@
+INSTALLATION
+ACTIVE_BRANCH: master
+ACTIVE_COMMIT: 3a8849c7afb215085b32da84bcdbeb7c6d26880e
+RUNTIME_VERSION: XHS-Downloader V2.8 Beta
+ORIGINAL_RELEASE_SHA256: ff5e7b6355895d5d18232f5db69d5b08c7237720c2c8c57b1d9b5bde8fa40c99
+
+CHANGED_FIELDS
+image_format: JPEG -> AUTO
+video_preference: resolution -> resolution
+live_download: false -> true
+folder_mode: false -> true
+write_mtime: false -> true
+note_format: empty -> md
+
+ARTIFACTS
+MODIFIED_FILE: C:\WorkSpace\xiaohongshu\XHS-Downloader\Volume\settings.json
+DIFF_FILE: C:\WorkSpace\xiaohongshu\XHS-Downloader\INSTALL_CONFIG.diff
+VERIFICATION_FILE: C:\WorkSpace\xiaohongshu\XHS-Downloader\VERIFICATION.txt
+ROLLBACK_FILE: C:\WorkSpace\xiaohongshu\XHS-Downloader\ROLLBACK.sh
+
+BASELINE
+COMMAND: powershell.exe -NoProfile -Command "$s=Get-Content -Raw '.\.install\settings.baseline.json' | ConvertFrom-Json; Write-Output \"image_format=$($s.image_format)\"; Write-Output \"video_preference=$($s.video_preference)\"; Write-Output \"live_download=$($s.live_download)\"; Write-Output \"folder_mode=$($s.folder_mode)\"; Write-Output \"write_mtime=$($s.write_mtime)\"; Write-Output \"note_format=$($s.note_format)\"; $ok=$s.image_format -eq 'JPEG' -and $s.video_preference -eq 'resolution' -and -not $s.live_download -and -not $s.folder_mode -and -not $s.write_mtime -and $s.note_format -eq ''; Write-Output \"RESULT=$(if($ok){'PASS'}else{'FAIL'})\"; if(-not $ok){exit 1}"
+INPUT: C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\settings.baseline.json
+INPUT_SHA256: 3549f80ee47cb6d01f19efa3736f8b3296b367cd409818a40aa4a2c402959179
+LITERAL_OUTPUT:
+image_format=JPEG
+video_preference=resolution
+live_download=False
+folder_mode=False
+write_mtime=False
+note_format=
+RESULT=PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: powershell.exe -NoProfile -Command "$s=Get-Content -Raw '.\Volume\settings.json' | ConvertFrom-Json; Write-Output \"image_format=$($s.image_format)\"; Write-Output \"video_preference=$($s.video_preference)\"; Write-Output \"live_download=$($s.live_download)\"; Write-Output \"folder_mode=$($s.folder_mode)\"; Write-Output \"write_mtime=$($s.write_mtime)\"; Write-Output \"note_format=$($s.note_format)\"; $ok=$s.image_format -eq 'AUTO' -and $s.video_preference -eq 'resolution' -and $s.live_download -and $s.folder_mode -and $s.write_mtime -and $s.note_format -eq 'md'; Write-Output \"RESULT=$(if($ok){'PASS'}else{'FAIL'})\"; if(-not $ok){exit 1}"
+INPUT: C:\WorkSpace\xiaohongshu\XHS-Downloader\Volume\settings.json
+INPUT_SHA256: 49f8e52ec62320447981e64ecd9f6d0031013fab9b7ee7db08c44891518e378e
+LITERAL_OUTPUT:
+image_format=AUTO
+video_preference=resolution
+live_download=True
+folder_mode=True
+write_mtime=True
+note_format=md
+RESULT=PASS
+EXIT_STATUS: 0
+
+ROLLBACK
+COMMAND: "C:\Program Files\Git\bin\bash.exe" "C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\rollback-test-20260905\ROLLBACK.sh"
+INPUT: C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\rollback-test-20260905\Volume\settings.json
+INPUT_SHA256: 49f8e52ec62320447981e64ecd9f6d0031013fab9b7ee7db08c44891518e378e
+LITERAL_OUTPUT:
+Restored baseline settings: image_format=JPEG, live_download=false, folder_mode=false, write_mtime=false, note_format=empty
+OUTPUT_SHA256: 3549f80ee47cb6d01f19efa3736f8b3296b367cd409818a40aa4a2c402959179
+EXPECTED_SHA256: 3549f80ee47cb6d01f19efa3736f8b3296b367cd409818a40aa4a2c402959179
+RESTORED=True
+EXIT_STATUS: 0
+RESTORED_BEHAVIOR: baseline JPEG conversion, Live Photo off, shared folder, original filesystem mtime, and no note sidecar.
+
+RUNTIME
+COMMAND: uv run python main.py --version
+INPUT: none
+LITERAL_OUTPUT: XHS-Downloader V2.8 Beta
+EXIT_STATUS: 0
+
+GUI
+COMMAND: .\.venv\Scripts\python.exe main.py
+INPUT: none
+LITERAL_RESULT: RUNNING_AFTER_8S=True; STDERR was empty; test process was then stopped.
+EXIT_STATUS: stopped_after_successful_start
+
+FINAL_STATUS
+The isolated rollback copy has baseline behavior. MODIFIED_FILE remains configured for direct CDN image format, resolution-first video selection, Live Photo download, per-note folders, publication mtime, and Markdown note text.

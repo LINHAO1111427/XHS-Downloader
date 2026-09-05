@@ -1,0 +1,565 @@
+diff --git a/.install/ai-config-modified/ai_gateway.py b/.install/ai-config-modified/ai_gateway.py
+new file mode 100644
+index 0000000..01d832f
+--- /dev/null
++++ b/.install/ai-config-modified/ai_gateway.py
+@@ -0,0 +1,190 @@
++from __future__ import annotations
++
++import json
++import os
++from pathlib import Path
++from tempfile import NamedTemporaryFile
++from threading import Lock
++from time import perf_counter
++from urllib.error import HTTPError, URLError
++from urllib.parse import urlsplit, urlunsplit
++from urllib.request import Request, urlopen
++
++
++class AIConfigError(ValueError):
++    pass
++
++
++class AIGatewayConnectionError(RuntimeError):
++    pass
++
++
++def normalize_base_url(value: str) -> str:
++    value = value.strip().rstrip("/")
++    if not value:
++        return ""
++    parsed = urlsplit(value)
++    if (
++        parsed.scheme not in {"http", "https"}
++        or not parsed.netloc
++        or parsed.username
++        or parsed.password
++        or parsed.query
++        or parsed.fragment
++    ):
++        raise AIConfigError("中转 Base URL 必须是有效的 HTTP 或 HTTPS 地址")
++    return urlunsplit(
++        (parsed.scheme.lower(), parsed.netloc, parsed.path.rstrip("/"), "", "")
++    )
++
++
++class AIConfigStore:
++    def __init__(self, path: Path) -> None:
++        self.path = path
++        self._lock = Lock()
++
++    def public_config(self) -> dict:
++        with self._lock:
++            return self._public(self._read())
++
++    def update(
++        self,
++        base_url: str,
++        model: str,
++        api_key: str = "",
++        clear_api_key: bool = False,
++    ) -> dict:
++        normalized_url = normalize_base_url(base_url)
++        normalized_model = model.strip()
++        with self._lock:
++            config = self._read()
++            config["base_url"] = normalized_url
++            config["model"] = normalized_model
++            if clear_api_key:
++                config["api_key"] = ""
++            elif api_key.strip():
++                config["api_key"] = api_key.strip()
++            self._write(config)
++            return self._public(config)
++
++    def connection_config(self) -> dict:
++        with self._lock:
++            config = self._read()
++        if not config["base_url"] or not config["api_key"]:
++            raise AIConfigError("请先配置中转 Base URL 和 API Key")
++        return config
++
++    def _read(self) -> dict[str, str]:
++        default = {"base_url": "", "api_key": "", "model": ""}
++        if not self.path.is_file():
++            return default
++        try:
++            with self.path.open("r", encoding="utf-8") as config_file:
++                stored = json.load(config_file)
++        except (OSError, json.JSONDecodeError):
++            return default
++        return {key: str(stored.get(key, default[key])).strip() for key in default}
++
++    def _write(self, config: dict[str, str]) -> None:
++        self.path.parent.mkdir(parents=True, exist_ok=True)
++        with NamedTemporaryFile(
++            "w",
++            encoding="utf-8",
++            dir=self.path.parent,
++            prefix=f".{self.path.stem}.",
++            suffix=".tmp",
++            delete=False,
++        ) as temporary:
++            json.dump(config, temporary, ensure_ascii=False, indent=2)
++            temporary.write("\n")
++            temporary_path = Path(temporary.name)
++        temporary_path.replace(self.path)
++        try:
++            os.chmod(self.path, 0o600)
++        except OSError:
++            pass
++
++    @staticmethod
++    def _public(config: dict[str, str]) -> dict:
++        base_url = config["base_url"]
++        key_configured = bool(config["api_key"])
++        return {
++            "base_url": base_url,
++            "model": config["model"],
++            "api_key_configured": key_configured,
++            "configured": bool(base_url and key_configured and config["model"]),
++            "models_url": f"{base_url}/models" if base_url else "",
++            "chat_completions_url": (
++                f"{base_url}/chat/completions" if base_url else ""
++            ),
++        }
++
++
++class AIGateway:
++    def __init__(self, store: AIConfigStore, timeout: float = 10) -> None:
++        self.store = store
++        self.timeout = timeout
++
++    def public_config(self) -> dict:
++        return self.store.public_config()
++
++    def configure(
++        self,
++        base_url: str,
++        model: str,
++        api_key: str = "",
++        clear_api_key: bool = False,
++    ) -> dict:
++        return self.store.update(base_url, model, api_key, clear_api_key)
++
++    def test_connection(self) -> dict:
++        config = self.store.connection_config()
++        models_url = f"{config['base_url']}/models"
++        request = Request(
++            models_url,
++            headers={
++                "Accept": "application/json",
++                "Authorization": f"Bearer {config['api_key']}",
++                "User-Agent": "XHS-Downloader-Web/2.8",
++            },
++            method="GET",
++        )
++        started = perf_counter()
++        try:
++            with urlopen(request, timeout=self.timeout) as response:
++                body = response.read(2 * 1024 * 1024 + 1)
++        except HTTPError as error:
++            raise AIGatewayConnectionError(f"中转服务返回 HTTP {error.code}") from error
++        except URLError as error:
++            raise AIGatewayConnectionError(
++                f"无法连接中转服务：{error.reason}"
++            ) from error
++        except TimeoutError as error:
++            raise AIGatewayConnectionError("连接中转服务超时") from error
++
++        if len(body) > 2 * 1024 * 1024:
++            raise AIGatewayConnectionError("中转服务响应过大")
++        try:
++            payload = json.loads(body)
++            models = payload["data"]
++            if not isinstance(models, list):
++                raise TypeError
++            model_ids = {
++                str(item["id"])
++                for item in models
++                if isinstance(item, dict) and item.get("id")
++            }
++        except (KeyError, TypeError, json.JSONDecodeError) as error:
++            raise AIGatewayConnectionError(
++                "中转服务响应不符合 OpenAI /models 格式"
++            ) from error
++
++        configured_model = config["model"]
++        return {
++            "ok": True,
++            "latency_ms": round((perf_counter() - started) * 1000),
++            "models_count": len(model_ids),
++            "model_available": (
++                configured_model in model_ids if configured_model else None
++            ),
++        }
+diff --git a/.install/ai-config-baseline/static/web/app.js b/.install/ai-config-modified/static/web/app.js
+index 7816be7..c2a33c1 100644
+--- a/.install/ai-config-baseline/static/web/app.js
++++ b/.install/ai-config-modified/static/web/app.js
+@@ -19,6 +19,17 @@ const elements = {
+     archiveButton: byId("archiveButton"),
+     refreshLibraryButton: byId("refreshLibraryButton"),
+     openFolderButton: byId("openFolderButton"),
++    aiSettingsButton: byId("aiSettingsButton"),
++    aiSettingsDialog: byId("aiSettingsDialog"),
++    aiSettingsForm: byId("aiSettingsForm"),
++    aiConfigState: byId("aiConfigState"),
++    aiBaseUrl: byId("aiBaseUrl"),
++    aiApiKey: byId("aiApiKey"),
++    clearAIKey: byId("clearAIKey"),
++    aiModel: byId("aiModel"),
++    toggleAIKeyButton: byId("toggleAIKeyButton"),
++    testAIButton: byId("testAIButton"),
++    saveAIButton: byId("saveAIButton"),
+     settingsButton: byId("settingsButton"),
+     settingsDialog: byId("settingsDialog"),
+     cookieForm: byId("cookieForm"),
+@@ -344,6 +355,67 @@ async function createEnhancement() {
+     finally { updateSelection(); }
+ }
+ 
++function renderAIConfig(config) {
++    elements.aiBaseUrl.value = config.base_url || "";
++    elements.aiModel.value = config.model || "";
++    elements.aiApiKey.value = "";
++    elements.clearAIKey.checked = false;
++    elements.clearAIKey.disabled = !config.api_key_configured;
++    if (config.configured) elements.aiConfigState.textContent = `已配置 · ${config.model}`;
++    else if (config.base_url || config.api_key_configured || config.model) elements.aiConfigState.textContent = "配置未完整";
++    else elements.aiConfigState.textContent = "未配置";
++}
++
++async function loadAIConfig() {
++    const config = await api("/api/ai/config");
++    renderAIConfig(config);
++    return config;
++}
++
++async function persistAIConfig(closeDialog = true) {
++    const result = await api("/api/ai/config", {
++        method: "PUT",
++        body: JSON.stringify({
++            base_url: elements.aiBaseUrl.value,
++            api_key: elements.aiApiKey.value,
++            model: elements.aiModel.value,
++            clear_api_key: elements.clearAIKey.checked,
++        }),
++    });
++    renderAIConfig(result.config);
++    if (closeDialog) elements.aiSettingsDialog.close();
++    return result.config;
++}
++
++async function saveAIConfig(event) {
++    event.preventDefault();
++    elements.saveAIButton.disabled = true;
++    try {
++        await persistAIConfig();
++        showToast("AI 中转配置已保存");
++    } catch (error) { showToast(error.message, true); }
++    finally { elements.saveAIButton.disabled = false; }
++}
++
++async function testAIConnection() {
++    elements.testAIButton.disabled = true;
++    elements.saveAIButton.disabled = true;
++    elements.aiConfigState.textContent = "正在测试连接";
++    try {
++        await persistAIConfig(false);
++        const result = await api("/api/ai/test", { method: "POST" });
++        const modelStatus = result.model_available === false ? "，默认模型未在列表中" : "";
++        elements.aiConfigState.textContent = `连接成功 · ${result.latency_ms} ms`;
++        showToast(`AI 中转连接成功，共 ${result.models_count} 个模型${modelStatus}`);
++    } catch (error) {
++        elements.aiConfigState.textContent = "连接失败";
++        showToast(error.message, true);
++    } finally {
++        elements.testAIButton.disabled = false;
++        elements.saveAIButton.disabled = false;
++    }
++}
++
+ elements.pasteButton.addEventListener("click", pasteLink);
+ elements.clearInputButton.addEventListener("click", () => { elements.urlInput.value = ""; elements.urlInput.focus(); });
+ elements.downloadButton.addEventListener("click", createDownload);
+@@ -358,6 +430,18 @@ elements.selectAllFiles.addEventListener("change", () => {
+ elements.enhanceButton.addEventListener("click", createEnhancement);
+ elements.archiveButton.addEventListener("click", downloadArchive);
+ elements.openFolderButton.addEventListener("click", async () => { try { await api("/api/folder/open", { method: "POST" }); } catch (error) { showToast(error.message, true); } });
++elements.aiSettingsButton.addEventListener("click", async () => {
++    elements.aiSettingsDialog.showModal();
++    try { await loadAIConfig(); } catch (error) { showToast(error.message, true); }
++});
++elements.aiSettingsForm.addEventListener("submit", saveAIConfig);
++elements.testAIButton.addEventListener("click", testAIConnection);
++elements.toggleAIKeyButton.addEventListener("click", () => {
++    const showing = elements.aiApiKey.type === "text";
++    elements.aiApiKey.type = showing ? "password" : "text";
++    elements.toggleAIKeyButton.innerHTML = `<i data-lucide="${showing ? "eye" : "eye-off"}"></i>`;
++    refreshIcons();
++});
+ elements.settingsButton.addEventListener("click", () => { elements.cookieInput.value = ""; elements.settingsDialog.showModal(); });
+ elements.cookieForm.addEventListener("submit", async (event) => {
+     event.preventDefault();
+diff --git a/.install/ai-config-baseline/static/web/index.html b/.install/ai-config-modified/static/web/index.html
+index 2078949..f3f1a64 100644
+--- a/.install/ai-config-baseline/static/web/index.html
++++ b/.install/ai-config-modified/static/web/index.html
+@@ -16,6 +16,9 @@
+     </div>
+     <div class="header-actions">
+         <span class="service-status" id="serviceStatus"><i></i><span>正在连接</span></span>
++        <button class="icon-button" id="aiSettingsButton" type="button" title="AI 中转设置" aria-label="AI 中转设置">
++            <i data-lucide="bot"></i>
++        </button>
+         <button class="icon-button" id="settingsButton" type="button" title="Cookie 设置" aria-label="Cookie 设置">
+             <i data-lucide="settings-2"></i>
+         </button>
+@@ -89,6 +92,19 @@
+     </form>
+ </dialog>
+ 
++<dialog id="aiSettingsDialog">
++    <form method="dialog" class="dialog-shell" id="aiSettingsForm">
++        <div class="dialog-heading"><div><h2>AI 中转设置</h2><p id="aiConfigState">正在读取</p></div><button class="icon-button subtle" value="cancel" aria-label="关闭"><i data-lucide="x"></i></button></div>
++        <div class="form-grid">
++            <label class="text-field" for="aiBaseUrl"><span>中转 Base URL</span><input id="aiBaseUrl" type="url" inputmode="url" placeholder="https://api.example.com/v1" autocomplete="url" required></label>
++            <label class="text-field" for="aiApiKey"><span>API Key</span><div class="secret-field"><input id="aiApiKey" type="password" placeholder="留空保留已保存的密钥" autocomplete="new-password"><button class="icon-button subtle" id="toggleAIKeyButton" type="button" title="显示或隐藏 API Key" aria-label="显示或隐藏 API Key"><i data-lucide="eye"></i></button></div></label>
++            <label class="check-field"><input id="clearAIKey" type="checkbox">清除已保存的 API Key</label>
++            <label class="text-field" for="aiModel"><span>默认模型</span><input id="aiModel" type="text" placeholder="例如 gpt-4o-mini" autocomplete="off" required></label>
++        </div>
++        <div class="dialog-actions"><button class="button secondary" id="testAIButton" type="button"><i data-lucide="activity"></i>测试连接</button><button class="button primary" id="saveAIButton" type="submit"><i data-lucide="save"></i>保存配置</button></div>
++    </form>
++</dialog>
++
+ <dialog id="disclaimerDialog">
+     <form method="dialog" class="dialog-shell compact">
+         <div class="dialog-heading"><div><h2>首次使用确认</h2><p>GNU General Public License v3.0</p></div></div>
+diff --git a/.install/ai-config-baseline/static/web/styles.css b/.install/ai-config-modified/static/web/styles.css
+index 996fa64..a6d7d3c 100644
+--- a/.install/ai-config-baseline/static/web/styles.css
++++ b/.install/ai-config-modified/static/web/styles.css
+@@ -134,6 +134,12 @@ dialog::backdrop { background: rgba(22, 24, 27, .45); }
+ .dialog-heading p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+ .dialog-copy { margin: 0; color: #4e5258; line-height: 1.7; }
+ .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
++.form-grid { display: grid; gap: 15px; }
++.text-field { display: grid; gap: 7px; color: #3b3e43; font-size: 13px; font-weight: 600; }
++.text-field > input, .secret-field > input { width: 100%; min-width: 0; height: 42px; padding: 0 12px; color: var(--text); background: #fbfbfc; border: 1px solid var(--line-strong); border-radius: var(--radius); outline: none; }
++.secret-field { display: grid; grid-template-columns: minmax(0, 1fr) 42px; gap: 6px; }
++.secret-field .icon-button { width: 42px; height: 42px; }
++.check-field { display: flex; align-items: center; gap: 8px; width: fit-content; color: var(--muted); font-size: 12px; }
+ .toast { position: fixed; right: 22px; bottom: 22px; max-width: min(390px, calc(100vw - 44px)); padding: 11px 14px; color: white; background: #30343a; border-radius: var(--radius); box-shadow: var(--shadow); opacity: 0; transform: translateY(8px); pointer-events: none; transition: .2s ease; z-index: 30; }
+ .toast.show { opacity: 1; transform: translateY(0); }
+ .toast.error { background: #9f1d31; }
+diff --git a/.install/ai-config-baseline/tests/test_web_app.py b/.install/ai-config-modified/tests/test_web_app.py
+index a448955..32d4fa0 100644
+--- a/.install/ai-config-baseline/tests/test_web_app.py
++++ b/.install/ai-config-modified/tests/test_web_app.py
+@@ -1,12 +1,16 @@
++import json
+ import tempfile
+ import time
+ import unittest
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from pathlib import Path
++from threading import Thread
+ from zipfile import ZipFile
+ 
+ from fastapi.testclient import TestClient
+ from PIL import Image
+ 
++from ai_gateway import AIConfigStore, AIGateway
+ from media_enhancer import enhance_media
+ from web_app import create_app
+ 
+@@ -72,7 +76,13 @@ class WebAppTests(unittest.TestCase):
+         self.download_root = Path(self.temporary.name) / "Download"
+         self.download_root.mkdir()
+         self.runtime = FakeRuntime(self.download_root)
+-        self.client_context = TestClient(create_app(runtime=self.runtime))
++        self.ai_gateway = AIGateway(
++            AIConfigStore(Path(self.temporary.name) / "ai_config.json"),
++            timeout=2,
++        )
++        self.client_context = TestClient(
++            create_app(runtime=self.runtime, ai_gateway=self.ai_gateway)
++        )
+         self.client = self.client_context.__enter__()
+ 
+     def tearDown(self):
+@@ -192,6 +202,82 @@ class WebAppTests(unittest.TestCase):
+         self.assertEqual(task["outputs"], ["note/photo_enhanced_2x.png"])
+         self.assertTrue((self.download_root / task["outputs"][0]).is_file())
+ 
++    def test_ai_gateway_config_is_private_and_connection_is_tested(self):
++        class ModelsHandler(BaseHTTPRequestHandler):
++            def do_GET(self):
++                if (
++                    self.path != "/v1/models"
++                    or self.headers.get("Authorization") != "Bearer relay-secret"
++                ):
++                    self.send_response(401)
++                    self.end_headers()
++                    return
++                body = json.dumps({"data": [{"id": "demo-model"}]}).encode()
++                self.send_response(200)
++                self.send_header("Content-Type", "application/json")
++                self.send_header("Content-Length", str(len(body)))
++                self.end_headers()
++                self.wfile.write(body)
++
++            def log_message(self, format_, *args):
++                pass
++
++        server = ThreadingHTTPServer(("127.0.0.1", 0), ModelsHandler)
++        thread = Thread(target=server.serve_forever, daemon=True)
++        thread.start()
++        try:
++            saved = self.client.put(
++                "/api/ai/config",
++                json={
++                    "base_url": f"http://127.0.0.1:{server.server_port}/v1/",
++                    "api_key": "relay-secret",
++                    "model": "demo-model",
++                },
++            )
++            self.assertEqual(saved.status_code, 200)
++            self.assertNotIn("relay-secret", saved.text)
++            self.assertTrue(saved.json()["config"]["configured"])
++            self.assertTrue(saved.json()["config"]["models_url"].endswith("/v1/models"))
++
++            public = self.client.get("/api/ai/config")
++            self.assertNotIn("relay-secret", public.text)
++            self.assertTrue(public.json()["api_key_configured"])
++            tested = self.client.post("/api/ai/test")
++            self.assertEqual(tested.status_code, 200)
++            self.assertEqual(tested.json()["models_count"], 1)
++            self.assertTrue(tested.json()["model_available"])
++
++            preserved = self.client.put(
++                "/api/ai/config",
++                json={
++                    "base_url": f"http://127.0.0.1:{server.server_port}/v1",
++                    "api_key": "",
++                    "model": "demo-model",
++                },
++            )
++            self.assertTrue(preserved.json()["config"]["api_key_configured"])
++
++            cleared = self.client.put(
++                "/api/ai/config",
++                json={
++                    "base_url": f"http://127.0.0.1:{server.server_port}/v1",
++                    "model": "demo-model",
++                    "clear_api_key": True,
++                },
++            )
++            self.assertFalse(cleared.json()["config"]["api_key_configured"])
++            self.assertEqual(self.client.post("/api/ai/test").status_code, 409)
++        finally:
++            server.shutdown()
++            server.server_close()
++            thread.join(timeout=2)
++
++        invalid = self.client.put(
++            "/api/ai/config",
++            json={"base_url": "file:///tmp/relay", "model": "demo-model"},
++        )
++        self.assertEqual(invalid.status_code, 422)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/.install/ai-config-baseline/web_app.py b/.install/ai-config-modified/web_app.py
+index 030a028..7219da5 100644
+--- a/.install/ai-config-baseline/web_app.py
++++ b/.install/ai-config-modified/web_app.py
+@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
+ from pydantic import BaseModel, Field
+ from starlette.background import BackgroundTask
+ 
++from ai_gateway import AIConfigError, AIConfigStore, AIGateway, AIGatewayConnectionError
+ from media_enhancer import EnhancementManager, SUPPORTED_MEDIA_SUFFIXES
+ from source.GUI.backend import GuiBackend
+ from source.module import PROJECT, ROOT
+@@ -124,6 +125,13 @@ class EnhancementRequest(BaseModel):
+     paths: Annotated[list[str], Field(min_length=1, max_length=50)]
+ 
+ 
++class AIConfigRequest(BaseModel):
++    base_url: Annotated[str, Field(max_length=2_048)] = ""
++    api_key: Annotated[str, Field(max_length=32_000)] = ""
++    model: Annotated[str, Field(max_length=256)] = ""
++    clear_api_key: bool = False
++
++
+ def _resolve_file(root: Path, relative_path: str) -> Path:
+     root = root.resolve()
+     target = (root / relative_path).resolve()
+@@ -168,9 +176,13 @@ def create_app(
+     runtime: Runtime | None = None,
+     web_root: Path | None = None,
+     enhancer: EnhancementManager | None = None,
++    ai_gateway: AIGateway | None = None,
+ ) -> FastAPI:
+     active_runtime = runtime or DownloaderRuntime()
+     active_enhancer = enhancer or EnhancementManager()
++    active_ai_gateway = ai_gateway or AIGateway(
++        AIConfigStore(ROOT / "Volume" / "ai_config.json")
++    )
+     assets = (web_root or WEB_ROOT).resolve()
+     if not (assets / "index.html").is_file():
+         raise FileNotFoundError(f"网页入口不存在：{assets / 'index.html'}")
+@@ -187,6 +199,7 @@ def create_app(
+     app = FastAPI(title=f"{PROJECT} Web", lifespan=lifespan)
+     app.state.runtime = active_runtime
+     app.state.enhancer = active_enhancer
++    app.state.ai_gateway = active_ai_gateway
+     app.mount("/assets", StaticFiles(directory=assets), name="assets")
+ 
+     @app.get("/", include_in_schema=False)
+@@ -201,6 +214,8 @@ def create_app(
+             "version": PROJECT,
+             "source_media": "original_cdn",
+             "enhancement": "lanczos_2x",
++            "ai_gateway": "openai_compatible",
++            "ai_configured": active_ai_gateway.public_config()["configured"],
+         }
+ 
+     @app.get("/api/state")
+@@ -251,6 +266,32 @@ def create_app(
+     ) -> dict:
+         return _library(active_runtime, limit)
+ 
++    @app.get("/api/ai/config")
++    def ai_config() -> dict:
++        return active_ai_gateway.public_config()
++
++    @app.put("/api/ai/config")
++    def save_ai_config(request: AIConfigRequest) -> dict:
++        try:
++            config = active_ai_gateway.configure(
++                request.base_url,
++                request.model,
++                request.api_key,
++                request.clear_api_key,
++            )
++        except AIConfigError as error:
++            raise HTTPException(status_code=422, detail=str(error)) from error
++        return {"ok": True, "config": config}
++
++    @app.post("/api/ai/test")
++    def test_ai_connection() -> dict:
++        try:
++            return active_ai_gateway.test_connection()
++        except AIConfigError as error:
++            raise HTTPException(status_code=409, detail=str(error)) from error
++        except AIGatewayConnectionError as error:
++            raise HTTPException(status_code=502, detail=str(error)) from error
++
+     @app.get("/api/enhancements")
+     def enhancements() -> dict:
+         return {"tasks": active_enhancer.snapshot()}

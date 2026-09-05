@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#d9273e">
+    <title>小红书素材下载</title>
+    <link rel="icon" href="/assets/logo.png">
+    <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+<header class="app-header">
+    <div class="brand">
+        <img src="/assets/logo.png" alt="" width="42" height="42">
+        <div><h1>小红书素材下载</h1><p>XHS-Downloader Web</p></div>
+    </div>
+    <div class="header-actions">
+        <span class="service-status" id="serviceStatus"><i></i><span>正在连接</span></span>
+        <button class="icon-button" id="aiSettingsButton" type="button" title="AI 中转设置" aria-label="AI 中转设置">
+            <i data-lucide="bot"></i>
+        </button>
+        <button class="icon-button" id="settingsButton" type="button" title="Cookie 设置" aria-label="Cookie 设置">
+            <i data-lucide="settings-2"></i>
+        </button>
+        <button class="icon-button" id="openFolderButton" type="button" title="打开下载目录" aria-label="打开下载目录">
+            <i data-lucide="folder-open"></i>
+        </button>
+    </div>
+</header>
+
+<main>
+    <section class="input-band" aria-labelledby="inputTitle">
+        <div class="section-heading input-heading">
+            <div><h2 id="inputTitle">新建下载</h2><p id="downloadRoot">正在读取下载目录</p></div>
+            <div class="quality-status" aria-label="下载质量状态">
+                <span class="quality-badge" title="从原始 CDN 获取，规避平台后加水印；不处理画面中已经烧录的水印"><i data-lucide="shield-check"></i> 源文件去平台水印</span>
+                <span class="quality-badge resolution"><i data-lucide="badge-check"></i> 原始清晰度优先</span>
+                <span class="quality-badge live" id="livePhotoBadge"><i data-lucide="images"></i> 实况图片已开启</span>
+            </div>
+        </div>
+        <label class="url-field" for="urlInput">
+            <span>笔记链接</span>
+            <textarea id="urlInput" rows="3" placeholder="粘贴小红书笔记链接或包含链接的分享文本" autocomplete="off"></textarea>
+        </label>
+        <div class="input-actions">
+            <div class="secondary-actions">
+                <button class="button secondary" id="pasteButton" type="button"><i data-lucide="clipboard-paste"></i>粘贴</button>
+                <button class="icon-button subtle" id="clearInputButton" type="button" title="清空链接" aria-label="清空链接"><i data-lucide="x"></i></button>
+            </div>
+            <button class="button primary" id="downloadButton" type="button"><i data-lucide="download"></i>开始下载</button>
+        </div>
+    </section>
+
+    <section class="content-section ai-section" aria-labelledby="aiStudioTitle">
+        <div class="section-heading">
+            <div><h2 id="aiStudioTitle">AI 内容工作台</h2><p id="aiGenerationState">正在读取 AI 配置</p></div>
+            <span class="visual-context" id="aiVisualCount"><i data-lucide="image"></i>视觉参考 0 张</span>
+        </div>
+        <div class="ai-workspace">
+            <div class="ai-input-pane">
+                <fieldset class="protocol-field"><legend>生成模式</legend><div class="segmented-control"><label><input type="radio" name="aiGenerationMode" value="rewrite" checked><span>内容改写</span></label><label><input type="radio" name="aiGenerationMode" value="create"><span>图文创作</span></label></div></fieldset>
+                <div class="ai-image-options" id="aiImageOptions" hidden>
+                    <label class="select-field" for="aiImageSize"><span>图片比例</span><select id="aiImageSize"><option value="1024x1024">方图 1:1</option><option value="1024x1536">竖图 2:3</option><option value="1536x1024">横图 3:2</option></select></label>
+                    <label class="select-field" for="aiImageQuality"><span>图片质量</span><select id="aiImageQuality"><option value="low">标准</option><option value="medium">精细</option><option value="high">高清</option></select></label>
+                </div>
+                <label class="url-field" for="aiSourceText"><span>原始内容或主题</span><textarea id="aiSourceText" rows="6" placeholder="输入需要改写的正文，或填写创作主题"></textarea></label>
+                <label class="url-field" for="aiInstructions"><span>补充要求</span><textarea id="aiInstructions" class="compact-textarea" rows="3" placeholder="语气、篇幅、受众或必须保留的信息"></textarea></label>
+                <button class="button primary ai-generate-button" id="generateAIButton" type="button"><i data-lucide="sparkles"></i><span id="generateAIButtonLabel">生成内容</span></button>
+            </div>
+            <div class="ai-output-pane">
+                <div class="output-heading"><span>生成结果</span><div><button class="icon-button subtle" id="clearAIOutputButton" type="button" title="清空生成结果" aria-label="清空生成结果"><i data-lucide="eraser"></i></button><button class="icon-button subtle" id="copyAIOutputButton" type="button" title="复制生成结果" aria-label="复制生成结果" disabled><i data-lucide="copy"></i></button></div></div>
+                <textarea id="aiOutput" rows="14" placeholder="AI 生成结果将在这里显示" readonly></textarea>
+                <div class="ai-image-result" id="aiImageResult" hidden>
+                    <div class="generated-image-heading"><span>生成图片</span><span id="generatedImageMeta"></span></div>
+                    <button class="generated-image-preview" id="generatedImagePreviewButton" type="button" title="放大查看生成图片"><img id="generatedImagePreview" alt="AI 生成图片"></button>
+                    <a class="button secondary generated-image-download" id="generatedImageDownload" href="#" download><i data-lucide="download"></i>下载图片</a>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="content-section" aria-labelledby="taskTitle">
+        <div class="section-heading">
+            <div><h2 id="taskTitle">下载任务</h2><p id="taskSummary">暂无任务</p></div>
+            <button class="icon-button subtle" id="clearTasksButton" type="button" title="清理已结束任务" aria-label="清理已结束任务"><i data-lucide="list-x"></i></button>
+        </div>
+        <div class="task-list" id="taskList" aria-live="polite">
+            <div class="empty-state"><i data-lucide="inbox"></i><span>暂无下载任务</span></div>
+        </div>
+    </section>
+
+    <section class="content-section library-section" aria-labelledby="libraryTitle">
+        <div class="section-heading library-heading">
+            <div><h2 id="libraryTitle">已下载文件</h2><p id="librarySummary">正在读取</p></div>
+            <div class="library-actions">
+                <label class="search-field"><i data-lucide="search"></i><input id="fileSearch" type="search" placeholder="搜索文件"></label>
+                <button class="button enhance" id="enhanceButton" type="button" disabled title="生成 2 倍清晰增强副本"><i data-lucide="wand-sparkles"></i>清晰增强 2x</button>
+                <button class="button secondary" id="archiveButton" type="button" disabled><i data-lucide="archive"></i>打包下载</button>
+                <button class="icon-button subtle" id="refreshLibraryButton" type="button" title="刷新文件" aria-label="刷新文件"><i data-lucide="refresh-cw"></i></button>
+            </div>
+        </div>
+        <div class="enhancement-strip" id="enhancementPanel" hidden aria-live="polite">
+            <div class="enhancement-copy"><i data-lucide="sparkles"></i><div><strong id="enhancementTitle">清晰增强</strong><span id="enhancementDetail"></span></div></div>
+            <div class="enhancement-progress"><div class="progress-track"><div class="progress-bar" id="enhancementProgress"></div></div><span class="state-pill" id="enhancementState"></span></div>
+        </div>
+        <div class="file-table-wrap">
+            <table class="file-table">
+                <thead><tr><th class="select-cell"><input id="selectAllFiles" type="checkbox" aria-label="全选文件"></th><th class="preview-cell">预览</th><th>文件名</th><th>格式</th><th>大小</th><th>修改时间</th><th class="action-cell"></th></tr></thead>
+                <tbody id="fileList"></tbody>
+            </table>
+            <div class="empty-state" id="fileEmpty"><i data-lucide="folder-search"></i><span>暂无已下载文件</span></div>
+        </div>
+    </section>
+</main>
+
+<dialog id="settingsDialog">
+    <form method="dialog" class="dialog-shell" id="cookieForm">
+        <div class="dialog-heading"><div><h2>Cookie 设置</h2><p id="cookieState">未配置</p></div><button class="icon-button subtle" value="cancel" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <label class="url-field" for="cookieInput"><span>小红书网页 Cookie</span><textarea id="cookieInput" rows="5" placeholder="粘贴 Cookie；留空并保存可清除" autocomplete="off"></textarea></label>
+        <div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button class="button primary" id="saveCookieButton" type="submit"><i data-lucide="save"></i>保存</button></div>
+    </form>
+</dialog>
+
+<dialog id="aiSettingsDialog">
+    <form method="dialog" class="dialog-shell" id="aiSettingsForm">
+        <div class="dialog-heading"><div><h2>AI 中转设置</h2><p id="aiConfigState">正在读取</p></div><button class="icon-button subtle" value="cancel" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="form-grid">
+            <label class="text-field" for="aiBaseUrl"><span>中转 Base URL</span><input id="aiBaseUrl" type="url" inputmode="url" placeholder="https://api.example.com/v1" autocomplete="url" required></label>
+            <fieldset class="protocol-field"><legend>API 协议</legend><div class="segmented-control"><label><input type="radio" name="aiProtocol" value="responses" checked><span>Responses</span></label><label><input type="radio" name="aiProtocol" value="chat_completions"><span>Chat Completions</span></label></div></fieldset>
+            <label class="text-field" for="aiApiKey"><span>API Key</span><div class="secret-field"><input id="aiApiKey" type="password" placeholder="留空保留已保存的密钥" autocomplete="new-password"><button class="icon-button subtle" id="toggleAIKeyButton" type="button" title="显示或隐藏 API Key" aria-label="显示或隐藏 API Key"><i data-lucide="eye"></i></button></div></label>
+            <label class="check-field"><input id="clearAIKey" type="checkbox">清除已保存的 API Key</label>
+            <label class="text-field" for="aiModel"><span>默认模型</span><input id="aiModel" type="text" placeholder="例如 gpt-4o-mini" autocomplete="off" required></label>
+            <label class="text-field" for="aiImageModel"><span>图片模型</span><input id="aiImageModel" type="text" placeholder="例如 gpt-image-2" autocomplete="off"></label>
+        </div>
+        <div class="dialog-actions"><button class="button secondary" id="testAIButton" type="button"><i data-lucide="activity"></i>测试连接</button><button class="button primary" id="saveAIButton" type="submit"><i data-lucide="save"></i>保存配置</button></div>
+    </form>
+</dialog>
+
+<dialog id="mediaViewerDialog" class="media-viewer-dialog">
+    <div class="media-viewer-shell">
+        <div class="media-viewer-heading"><div><h2 id="mediaViewerTitle">媒体预览</h2><p id="mediaViewerMeta"></p></div><div><a class="icon-button" id="mediaViewerDownload" href="#" title="下载当前文件" aria-label="下载当前文件"><i data-lucide="download"></i></a><button class="icon-button" id="closeMediaViewerButton" type="button" title="关闭预览" aria-label="关闭预览"><i data-lucide="x"></i></button></div></div>
+        <div class="media-stage" id="mediaStage"><button class="viewer-nav previous" id="previousMediaButton" type="button" title="上一个媒体" aria-label="上一个媒体"><i data-lucide="chevron-left"></i></button><img id="mediaViewerImage" alt="" hidden><video id="mediaViewerVideo" controls playsinline hidden></video><button class="viewer-nav next" id="nextMediaButton" type="button" title="下一个媒体" aria-label="下一个媒体"><i data-lucide="chevron-right"></i></button></div>
+    </div>
+</dialog>
+
+<dialog id="disclaimerDialog">
+    <form method="dialog" class="dialog-shell compact">
+        <div class="dialog-heading"><div><h2>首次使用确认</h2><p>GNU General Public License v3.0</p></div></div>
+        <p class="dialog-copy">下载任务仅处理你提交的公开链接。继续使用即表示你同意 XHS-Downloader 项目的使用声明。</p>
+        <div class="dialog-actions"><button class="button primary" id="acceptDisclaimerButton" type="button">同意并继续</button></div>
+    </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="/assets/lucide.min.js"></script>
+<script src="/assets/app.js"></script>
+</body>
+</html>

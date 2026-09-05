@@ -1,0 +1,213 @@
+diff --git a/.install/codex-relay-baseline/ai_config.state b/.install/codex-relay-modified/ai_config.state
+index 969a67b..ea1048f 100644
+--- a/.install/codex-relay-baseline/ai_config.state
++++ b/.install/codex-relay-modified/ai_config.state
+@@ -1 +1,6 @@
+-ABSENT
++CONFIGURED=true
++KEY_CONFIGURED=true
++MODEL=gpt-5.6-sol
++PROTOCOL=responses
++REQUEST_URL=http://127.0.0.1:8088/v1/responses
++SECRET_VALUE=REDACTED
+diff --git a/.install/codex-relay-baseline/ai_gateway.py b/.install/codex-relay-modified/ai_gateway.py
+index 01d832f..2ac7263 100644
+--- a/.install/codex-relay-baseline/ai_gateway.py
++++ b/.install/codex-relay-modified/ai_gateway.py
+@@ -19,6 +19,9 @@ class AIGatewayConnectionError(RuntimeError):
+     pass
+ 
+ 
++API_PROTOCOLS = frozenset({"chat_completions", "responses"})
++
++
+ def normalize_base_url(value: str) -> str:
+     value = value.strip().rstrip("/")
+     if not value:
+@@ -53,13 +56,18 @@ class AIConfigStore:
+         model: str,
+         api_key: str = "",
+         clear_api_key: bool = False,
++        protocol: str = "responses",
+     ) -> dict:
+         normalized_url = normalize_base_url(base_url)
+         normalized_model = model.strip()
++        normalized_protocol = protocol.strip().lower()
++        if normalized_protocol not in API_PROTOCOLS:
++            raise AIConfigError("API 协议必须是 Responses 或 Chat Completions")
+         with self._lock:
+             config = self._read()
+             config["base_url"] = normalized_url
+             config["model"] = normalized_model
++            config["protocol"] = normalized_protocol
+             if clear_api_key:
+                 config["api_key"] = ""
+             elif api_key.strip():
+@@ -75,7 +83,12 @@ class AIConfigStore:
+         return config
+ 
+     def _read(self) -> dict[str, str]:
+-        default = {"base_url": "", "api_key": "", "model": ""}
++        default = {
++            "base_url": "",
++            "api_key": "",
++            "model": "",
++            "protocol": "responses",
++        }
+         if not self.path.is_file():
+             return default
+         try:
+@@ -108,15 +121,16 @@ class AIConfigStore:
+     def _public(config: dict[str, str]) -> dict:
+         base_url = config["base_url"]
+         key_configured = bool(config["api_key"])
++        protocol = config["protocol"]
++        endpoint = "responses" if protocol == "responses" else "chat/completions"
+         return {
+             "base_url": base_url,
+             "model": config["model"],
++            "protocol": protocol,
+             "api_key_configured": key_configured,
+             "configured": bool(base_url and key_configured and config["model"]),
+             "models_url": f"{base_url}/models" if base_url else "",
+-            "chat_completions_url": (
+-                f"{base_url}/chat/completions" if base_url else ""
+-            ),
++            "request_url": f"{base_url}/{endpoint}" if base_url else "",
+         }
+ 
+ 
+@@ -134,8 +148,15 @@ class AIGateway:
+         model: str,
+         api_key: str = "",
+         clear_api_key: bool = False,
++        protocol: str = "responses",
+     ) -> dict:
+-        return self.store.update(base_url, model, api_key, clear_api_key)
++        return self.store.update(
++            base_url,
++            model,
++            api_key,
++            clear_api_key,
++            protocol,
++        )
+ 
+     def test_connection(self) -> dict:
+         config = self.store.connection_config()
+diff --git a/.install/codex-relay-baseline/static/web/app.js b/.install/codex-relay-modified/static/web/app.js
+index c2a33c1..95261ea 100644
+--- a/.install/codex-relay-baseline/static/web/app.js
++++ b/.install/codex-relay-modified/static/web/app.js
+@@ -27,6 +27,7 @@ const elements = {
+     aiApiKey: byId("aiApiKey"),
+     clearAIKey: byId("clearAIKey"),
+     aiModel: byId("aiModel"),
++    aiProtocols: document.querySelectorAll('input[name="aiProtocol"]'),
+     toggleAIKeyButton: byId("toggleAIKeyButton"),
+     testAIButton: byId("testAIButton"),
+     saveAIButton: byId("saveAIButton"),
+@@ -358,6 +359,7 @@ async function createEnhancement() {
+ function renderAIConfig(config) {
+     elements.aiBaseUrl.value = config.base_url || "";
+     elements.aiModel.value = config.model || "";
++    elements.aiProtocols.forEach((input) => { input.checked = input.value === config.protocol; });
+     elements.aiApiKey.value = "";
+     elements.clearAIKey.checked = false;
+     elements.clearAIKey.disabled = !config.api_key_configured;
+@@ -380,6 +382,7 @@ async function persistAIConfig(closeDialog = true) {
+             api_key: elements.aiApiKey.value,
+             model: elements.aiModel.value,
+             clear_api_key: elements.clearAIKey.checked,
++            protocol: [...elements.aiProtocols].find((input) => input.checked)?.value || "responses",
+         }),
+     });
+     renderAIConfig(result.config);
+diff --git a/.install/codex-relay-baseline/static/web/index.html b/.install/codex-relay-modified/static/web/index.html
+index f3f1a64..e362923 100644
+--- a/.install/codex-relay-baseline/static/web/index.html
++++ b/.install/codex-relay-modified/static/web/index.html
+@@ -97,6 +97,7 @@
+         <div class="dialog-heading"><div><h2>AI 中转设置</h2><p id="aiConfigState">正在读取</p></div><button class="icon-button subtle" value="cancel" aria-label="关闭"><i data-lucide="x"></i></button></div>
+         <div class="form-grid">
+             <label class="text-field" for="aiBaseUrl"><span>中转 Base URL</span><input id="aiBaseUrl" type="url" inputmode="url" placeholder="https://api.example.com/v1" autocomplete="url" required></label>
++            <fieldset class="protocol-field"><legend>API 协议</legend><div class="segmented-control"><label><input type="radio" name="aiProtocol" value="responses" checked><span>Responses</span></label><label><input type="radio" name="aiProtocol" value="chat_completions"><span>Chat Completions</span></label></div></fieldset>
+             <label class="text-field" for="aiApiKey"><span>API Key</span><div class="secret-field"><input id="aiApiKey" type="password" placeholder="留空保留已保存的密钥" autocomplete="new-password"><button class="icon-button subtle" id="toggleAIKeyButton" type="button" title="显示或隐藏 API Key" aria-label="显示或隐藏 API Key"><i data-lucide="eye"></i></button></div></label>
+             <label class="check-field"><input id="clearAIKey" type="checkbox">清除已保存的 API Key</label>
+             <label class="text-field" for="aiModel"><span>默认模型</span><input id="aiModel" type="text" placeholder="例如 gpt-4o-mini" autocomplete="off" required></label>
+diff --git a/.install/codex-relay-baseline/static/web/styles.css b/.install/codex-relay-modified/static/web/styles.css
+index a6d7d3c..365d127 100644
+--- a/.install/codex-relay-baseline/static/web/styles.css
++++ b/.install/codex-relay-modified/static/web/styles.css
+@@ -140,6 +140,14 @@ dialog::backdrop { background: rgba(22, 24, 27, .45); }
+ .secret-field { display: grid; grid-template-columns: minmax(0, 1fr) 42px; gap: 6px; }
+ .secret-field .icon-button { width: 42px; height: 42px; }
+ .check-field { display: flex; align-items: center; gap: 8px; width: fit-content; color: var(--muted); font-size: 12px; }
++.protocol-field { min-width: 0; margin: 0; padding: 0; border: 0; }
++.protocol-field legend { margin-bottom: 7px; color: #3b3e43; font-size: 13px; font-weight: 600; }
++.segmented-control { display: grid; grid-template-columns: 1fr 1fr; padding: 3px; background: #eef0f2; border-radius: var(--radius); }
++.segmented-control label { position: relative; min-width: 0; }
++.segmented-control input { position: absolute; opacity: 0; pointer-events: none; }
++.segmented-control span { display: flex; align-items: center; justify-content: center; min-height: 34px; padding: 0 8px; border-radius: 4px; color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
++.segmented-control input:checked + span { color: var(--text); background: var(--surface); box-shadow: 0 1px 3px rgba(32, 33, 36, .14); }
++.segmented-control input:focus-visible + span { outline: 2px solid var(--info); outline-offset: 1px; }
+ .toast { position: fixed; right: 22px; bottom: 22px; max-width: min(390px, calc(100vw - 44px)); padding: 11px 14px; color: white; background: #30343a; border-radius: var(--radius); box-shadow: var(--shadow); opacity: 0; transform: translateY(8px); pointer-events: none; transition: .2s ease; z-index: 30; }
+ .toast.show { opacity: 1; transform: translateY(0); }
+ .toast.error { background: #9f1d31; }
+diff --git a/.install/codex-relay-baseline/tests/test_web_app.py b/.install/codex-relay-modified/tests/test_web_app.py
+index 32d4fa0..5626082 100644
+--- a/.install/codex-relay-baseline/tests/test_web_app.py
++++ b/.install/codex-relay-modified/tests/test_web_app.py
+@@ -232,12 +232,17 @@ class WebAppTests(unittest.TestCase):
+                     "base_url": f"http://127.0.0.1:{server.server_port}/v1/",
+                     "api_key": "relay-secret",
+                     "model": "demo-model",
++                    "protocol": "responses",
+                 },
+             )
+             self.assertEqual(saved.status_code, 200)
+             self.assertNotIn("relay-secret", saved.text)
+             self.assertTrue(saved.json()["config"]["configured"])
+             self.assertTrue(saved.json()["config"]["models_url"].endswith("/v1/models"))
++            self.assertEqual(saved.json()["config"]["protocol"], "responses")
++            self.assertTrue(
++                saved.json()["config"]["request_url"].endswith("/v1/responses")
++            )
+ 
+             public = self.client.get("/api/ai/config")
+             self.assertNotIn("relay-secret", public.text)
+@@ -277,6 +282,15 @@ class WebAppTests(unittest.TestCase):
+             json={"base_url": "file:///tmp/relay", "model": "demo-model"},
+         )
+         self.assertEqual(invalid.status_code, 422)
++        invalid_protocol = self.client.put(
++            "/api/ai/config",
++            json={
++                "base_url": "https://relay.example.com/v1",
++                "model": "demo-model",
++                "protocol": "legacy",
++            },
++        )
++        self.assertEqual(invalid_protocol.status_code, 422)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/.install/codex-relay-baseline/web_app.py b/.install/codex-relay-modified/web_app.py
+index 7219da5..dedaa7c 100644
+--- a/.install/codex-relay-baseline/web_app.py
++++ b/.install/codex-relay-modified/web_app.py
+@@ -130,6 +130,7 @@ class AIConfigRequest(BaseModel):
+     api_key: Annotated[str, Field(max_length=32_000)] = ""
+     model: Annotated[str, Field(max_length=256)] = ""
+     clear_api_key: bool = False
++    protocol: Annotated[str, Field(max_length=32)] = "responses"
+ 
+ 
+ def _resolve_file(root: Path, relative_path: str) -> Path:
+@@ -278,6 +279,7 @@ def create_app(
+                 request.model,
+                 request.api_key,
+                 request.clear_api_key,
++                request.protocol,
+             )
+         except AIConfigError as error:
+             raise HTTPException(status_code=422, detail=str(error)) from error

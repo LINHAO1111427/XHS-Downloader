@@ -1,0 +1,98 @@
+XHS-Downloader live media preview and AI generation verification
+Date: 2026-09-05 Asia/Shanghai
+Branch: master
+Commit baseline: 3a8849c7afb215085b32da84bcdbeb7c6d26880e
+Changed fields: library.preview_url/media_kind/is_live/ai_compatible; media_preview=inline; ai_generation=responses_or_chat_completions; viewer=image_zoom_and_video_controls
+
+FOUR ARTIFACT PATHS
+MODIFIED_FILE=C:\WorkSpace\xiaohongshu\XHS-Downloader\web_app.py
+DIFF_FILE=C:\WorkSpace\xiaohongshu\XHS-Downloader\MEDIA_AI.diff
+VERIFICATION_FILE=C:\WorkSpace\xiaohongshu\XHS-Downloader\MEDIA_AI_VERIFICATION.txt
+ROLLBACK_FILE=C:\WorkSpace\xiaohongshu\XHS-Downloader\MEDIA_AI_ROLLBACK.sh
+
+PRESERVED ORIGINAL HASHES
+186992A0CEAB11FB05F8194848D0B0B499516FA1AB8C24AEA4D7FA251F954089  ai_gateway.py
+8097C9E781A8882FE33273A25FBD2E7B99F08E1C17677087465AAFADBCCC111F  web_app.py
+6D4677B4CFE78482C905A8DA3C8398337B9B2D68BF582E97FEEE3CB9A96E90B1  static/web/app.js
+C377C4FCA3FCE1C93640B54F40F7ED1DBA30F600FD1C1CA5772F0BCCA234C2BC  static/web/index.html
+82DFAD2A04B7C7F143BB570CDA907BC9B266AB5A516A9D457EA12AE697C3539E  static/web/styles.css
+D6705EB875C10C5026543087FB937858B4047ED77E2D2997F172B359ED001F55  tests/test_web_app.py
+Baseline directory: C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\media-ai-baseline
+
+BASELINE
+Command: .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Input: preserved pre-media-preview workspace and seven tests
+Literal result:
+  Ran 7 tests in 1.355s
+  OK
+Exit status: 0
+Baseline behavior/status: live_download=true already downloads same-stem image/MP4 pairs, but the web library had no media classification, inline preview viewer, or AI generation endpoint/workspace.
+
+MODIFIED
+Command: uvx ruff format --check ai_gateway.py web_app.py tests\test_web_app.py; uvx ruff check ai_gateway.py web_app.py tests\test_web_app.py; node --check static\web\app.js; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Input: ai_gateway.py, web_app.py, static/web/app.js, static/web/index.html, static/web/styles.css, tests/test_web_app.py
+Literal result:
+  3 files already formatted
+  All checks passed!
+  NODE_CHECK=OK
+  test_ai_gateway_config_is_private_and_connection_is_tested ... ok
+  test_enhancement_api_and_path_validation ... ok
+  test_file_path_cannot_escape_download_root ... ok
+  test_health_page_and_runtime_lifecycle ... ok
+  test_image_enhancement_creates_2x_copy ... ok
+  test_library_file_download_and_archive ... ok
+  test_task_clipboard_cookie_and_clear_endpoints ... ok
+  Ran 7 tests in 1.766s
+  OK
+Exit status: 0
+
+RUNNING API
+Command: Invoke-RestMethod GET http://127.0.0.1:5557/api/health, /api/ai/config, and /api/state; emit non-secret fields only
+Input: running local service and saved relay configuration
+Literal output: {"health_ok":true,"ai_gateway":"openai_compatible","ai_configured":true,"model":"gpt-5.6-sol","protocol":"responses","api_key_configured":true,"live_download":true}
+Exit status: 0
+
+REAL AI GENERATION
+Command: Playwright select reference.png, fill #aiSourceText and #aiInstructions, click #generateAIButton, inspect UI and POST /api/ai/generate
+Input: source_text="周末在城市公园散步，天气晴朗。"; one PNG visual reference; the configured local relay; no API key returned to the browser
+Literal result: {"state":"生成完成 · gpt-5.6-sol · 1 张参考图","output":"**标题｜周末去公园走走☀️**\n\n天气晴朗，在城市公园散散步。  \n简单走走，感受一下轻松的周末氛围。","visual":"视觉参考 1 张","buttonDisabled":false,"copyDisabled":false}
+Network result: POST http://127.0.0.1:5557/api/ai/generate => 200 OK
+Exit status: 0
+
+BROWSER MEDIA FLOW
+Command: Playwright at 1440x900 and 390x844; open image/video thumbnails; click image zoom; play and close video; inspect layout and console
+Input: a temporary same-stem PNG/MP4 live-photo fixture plus an existing 1179x1425 downloaded JPEG
+Literal result:
+  library mediaRows=13; liveMarkers=["实况"]; thumbnail=68x50
+  image natural=1179x1425; zoomed=true; stage scrollWidth=1179; stage scrollHeight=1425
+  video controls=true; readyState=4; duration=0.4; playback paused=false; currentTime=0.117576
+  after close: dialogOpen=false; paused=true; src=null
+  mobile dialog=374x802; video=374x744; bodyOverflow=0
+  mobile workspace body scrollWidth=375; clientWidth=375; overflowingControls=[]
+  console errors=0
+Desktop screenshot: C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\screenshots\media-ai-desktop-image-viewer.png
+Mobile screenshot: C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\screenshots\media-ai-mobile-workspace.png
+Mobile video screenshot: C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\screenshots\media-ai-mobile-video-viewer.png
+Cleanup result: actual_fixture_exists=false; wrong_fixture_exists=false
+Exit status: 0
+
+ROLLBACK
+Command: "C:\Program Files\Git\bin\bash.exe" MEDIA_AI_ROLLBACK.sh .install/media-ai-rollback-test; git diff --no-index --quiet -- .install/media-ai-baseline .install/media-ai-rollback-test
+Input: isolated copy of .install/media-ai-modified
+Literal output:
+  Restored branch fields: media_preview=absent; live_detection=absent; ai_generation=absent
+  Restored pre-media-AI files at: /c/WorkSpace/xiaohongshu/XHS-Downloader/.install/media-ai-rollback-test
+  ROLLBACK_EXIT=0
+  HASH_COMPARE_EXIT=0
+Exit status: 0
+
+Command: PYTHONPATH=.install/media-ai-rollback-test;. .\.venv\Scripts\python.exe -m unittest discover -s .install\media-ai-rollback-test\tests -v
+Input: byte-identical isolated rollback files, shared installed dependencies, and seven baseline tests
+Literal output:
+  Ran 7 tests in 1.206s
+  OK
+Exit status: 0
+Restored behavior/status: the isolated copy is byte-identical to the preserved baseline; inline preview, media classification, image zoom/video controls, and AI content generation are absent there, while the prior downloader, AI relay configuration, and enhancement behavior remain available.
+
+FINAL STATUS
+MODIFIED_FILE remains changed. The service is running at http://127.0.0.1:5557 with live_download=true and configured Responses relay; the saved API key remains private and was not included in artifacts or browser responses.

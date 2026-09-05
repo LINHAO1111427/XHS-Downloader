@@ -1,0 +1,1147 @@
+diff --git a/web_app.py b/web_app.py
+new file mode 100644
+index 0000000..1d639e3
+--- /dev/null
++++ b/web_app.py
+@@ -0,0 +1,280 @@
++from __future__ import annotations
++
++import argparse
++import asyncio
++from contextlib import asynccontextmanager
++from pathlib import Path
++from tempfile import NamedTemporaryFile
++from typing import Annotated, Protocol
++from urllib.parse import quote
++from zipfile import ZIP_STORED, ZipFile
++
++import uvicorn
++from fastapi import FastAPI, HTTPException, Query
++from fastapi.responses import FileResponse
++from fastapi.staticfiles import StaticFiles
++from pydantic import BaseModel, Field
++from starlette.background import BackgroundTask
++
++from source.GUI.backend import GuiBackend
++from source.module import PROJECT, ROOT
++
++WEB_ROOT = ROOT / "static" / "web"
++DEFAULT_HOST = "127.0.0.1"
++DEFAULT_PORT = 5557
++LIBRARY_SUFFIXES = {
++    ".avif",
++    ".heic",
++    ".jpeg",
++    ".jpg",
++    ".m4v",
++    ".md",
++    ".mov",
++    ".mp4",
++    ".png",
++    ".txt",
++    ".webp",
++}
++
++
++class Runtime(Protocol):
++    def start(self) -> None: ...
++
++    def stop(self) -> None: ...
++
++    def snapshot(self) -> dict: ...
++
++    def create_tasks(self, content: str, index: list[int] | None) -> list[dict]: ...
++
++    def cancel_task(self, task_id: str) -> bool: ...
++
++    def clear_finished(self) -> int: ...
++
++    def paste_content(self) -> str: ...
++
++    def accept_disclaimer(self) -> dict: ...
++
++    def save_cookie(self, cookie: str) -> dict: ...
++
++    def open_download_folder(self) -> bool: ...
++
++    def download_root(self) -> Path: ...
++
++
++class DownloaderRuntime:
++    def __init__(self) -> None:
++        self.backend = GuiBackend()
++
++    def start(self) -> None:
++        self.backend.start(wait=True)
++
++    def stop(self) -> None:
++        self.backend.stop()
++
++    def snapshot(self) -> dict:
++        state = self.backend.call(self.backend.snapshot())
++        settings = state.get("settings", {})
++        settings["cookie_configured"] = bool(settings.pop("cookie", ""))
++        return state
++
++    def create_tasks(self, content: str, index: list[int] | None) -> list[dict]:
++        return self.backend.call(self.backend.create_tasks(content, index))
++
++    def cancel_task(self, task_id: str) -> bool:
++        return self.backend.call(self.backend.cancel_task(task_id))
++
++    def clear_finished(self) -> int:
++        return self.backend.call(self.backend.clear_finished())
++
++    def paste_content(self) -> str:
++        return self.backend.call(self.backend.read_clipboard())
++
++    def accept_disclaimer(self) -> dict:
++        return self.backend.call(self.backend.accept_disclaimer())
++
++    def save_cookie(self, cookie: str) -> dict:
++        return self.backend.call(self.backend.save_settings({"cookie": cookie}))
++
++    def open_download_folder(self) -> bool:
++        return self.backend.call(self.backend.open_download_folder())
++
++    def download_root(self) -> Path:
++        settings = self.backend.call(self.backend.get_settings())
++        return (
++            Path(settings["effective_work_path"]) / settings.get("folder_name", "Download")
++        ).resolve()
++
++
++class TaskRequest(BaseModel):
++    content: Annotated[str, Field(min_length=1, max_length=20_000)]
++    index: Annotated[list[int] | None, Field(max_length=100)] = None
++
++
++class CookieRequest(BaseModel):
++    cookie: Annotated[str, Field(max_length=32_000)] = ""
++
++
++class ArchiveRequest(BaseModel):
++    paths: Annotated[list[str], Field(min_length=1, max_length=200)]
++
++
++def _resolve_file(root: Path, relative_path: str) -> Path:
++    root = root.resolve()
++    target = (root / relative_path).resolve()
++    try:
++        target.relative_to(root)
++    except ValueError as error:
++        raise HTTPException(status_code=404, detail="文件不存在") from error
++    if not target.is_file():
++        raise HTTPException(status_code=404, detail="文件不存在")
++    return target
++
++
++def _library(runtime: Runtime, limit: int) -> dict:
++    root = runtime.download_root()
++    root.mkdir(parents=True, exist_ok=True)
++    files = [
++        path
++        for path in root.rglob("*")
++        if path.is_file() and path.suffix.lower() in LIBRARY_SUFFIXES
++    ]
++    files.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
++    items = []
++    for path in files[:limit]:
++        stat = path.stat()
++        relative = path.relative_to(root).as_posix()
++        items.append(
++            {
++                "path": relative,
++                "name": path.name,
++                "suffix": path.suffix.lower().lstrip("."),
++                "size": stat.st_size,
++                "modified": int(stat.st_mtime),
++                "download_url": "/files/" + quote(relative, safe="/"),
++            }
++        )
++    return {"root": str(root), "items": items, "total": len(files)}
++
++
++def create_app(
++    runtime: Runtime | None = None,
++    web_root: Path | None = None,
++) -> FastAPI:
++    active_runtime = runtime or DownloaderRuntime()
++    assets = (web_root or WEB_ROOT).resolve()
++    if not (assets / "index.html").is_file():
++        raise FileNotFoundError(f"网页入口不存在：{assets / 'index.html'}")
++
++    @asynccontextmanager
++    async def lifespan(_: FastAPI):
++        await asyncio.to_thread(active_runtime.start)
++        try:
++            yield
++        finally:
++            await asyncio.to_thread(active_runtime.stop)
++
++    app = FastAPI(title=f"{PROJECT} Web", lifespan=lifespan)
++    app.state.runtime = active_runtime
++    app.mount("/assets", StaticFiles(directory=assets), name="assets")
++
++    @app.get("/", include_in_schema=False)
++    def index() -> FileResponse:
++        return FileResponse(assets / "index.html")
++
++    @app.get("/api/health")
++    def health() -> dict:
++        return {"ok": True, "service": "XHS-Downloader Web", "version": PROJECT}
++
++    @app.get("/api/state")
++    def state() -> dict:
++        return active_runtime.snapshot()
++
++    @app.post("/api/tasks", status_code=202)
++    def create_tasks(request: TaskRequest) -> dict:
++        created = active_runtime.create_tasks(request.content.strip(), request.index)
++        if not created:
++            raise HTTPException(status_code=422, detail="没有识别到有效的小红书链接")
++        return {"tasks": created}
++
++    @app.delete("/api/tasks/{task_id}")
++    def cancel_task(task_id: str) -> dict:
++        if not active_runtime.cancel_task(task_id):
++            raise HTTPException(status_code=409, detail="任务已开始或不存在")
++        return {"ok": True}
++
++    @app.delete("/api/tasks")
++    def clear_finished() -> dict:
++        return {"removed": active_runtime.clear_finished()}
++
++    @app.post("/api/clipboard")
++    def clipboard() -> dict:
++        return {"content": active_runtime.paste_content()}
++
++    @app.post("/api/disclaimer/accept")
++    def accept_disclaimer() -> dict:
++        return active_runtime.accept_disclaimer()
++
++    @app.put("/api/settings/cookie")
++    def save_cookie(request: CookieRequest) -> dict:
++        result = active_runtime.save_cookie(request.cookie.strip())
++        if not result.get("ok"):
++            raise HTTPException(status_code=409, detail=result.get("error", "保存失败"))
++        return {"ok": True, "cookie_configured": bool(request.cookie.strip())}
++
++    @app.post("/api/folder/open")
++    def open_folder() -> dict:
++        if not active_runtime.open_download_folder():
++            raise HTTPException(status_code=500, detail="无法打开下载目录")
++        return {"ok": True}
++
++    @app.get("/api/library")
++    def library(
++        limit: Annotated[int, Query(ge=1, le=1000)] = 300,
++    ) -> dict:
++        return _library(active_runtime, limit)
++
++    @app.get("/files/{relative_path:path}", name="download_file")
++    def download_file(relative_path: str) -> FileResponse:
++        target = _resolve_file(active_runtime.download_root(), relative_path)
++        return FileResponse(target, filename=target.name)
++
++    @app.post("/api/archive")
++    def archive(request: ArchiveRequest) -> FileResponse:
++        root = active_runtime.download_root()
++        selected = [_resolve_file(root, value) for value in dict.fromkeys(request.paths)]
++        export_root = root.parent / "Temp" / "web_exports"
++        export_root.mkdir(parents=True, exist_ok=True)
++        temporary = NamedTemporaryFile(
++            prefix="xiaohongshu_",
++            suffix=".zip",
++            dir=export_root,
++            delete=False,
++        )
++        temporary.close()
++        archive_path = Path(temporary.name)
++        try:
++            with ZipFile(archive_path, "w", compression=ZIP_STORED) as bundle:
++                for path in selected:
++                    bundle.write(path, path.relative_to(root).as_posix())
++        except Exception:
++            archive_path.unlink(missing_ok=True)
++            raise
++        return FileResponse(
++            archive_path,
++            filename="xiaohongshu-download.zip",
++            background=BackgroundTask(archive_path.unlink, missing_ok=True),
++        )
++
++    return app
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="XHS-Downloader local web interface")
++    parser.add_argument("--host", default=DEFAULT_HOST)
++    parser.add_argument("--port", default=DEFAULT_PORT, type=int)
++    args = parser.parse_args()
++    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="info")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/start-web.ps1 b/start-web.ps1
+new file mode 100644
+index 0000000..f5f6d44
+--- /dev/null
++++ b/start-web.ps1
+@@ -0,0 +1,58 @@
++[CmdletBinding()]
++param(
++    [int]$Port = 5557
++)
++
++$ErrorActionPreference = "Stop"
++$hostName = "127.0.0.1"
++$url = "http://${hostName}:$Port"
++$python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
++$app = Join-Path $PSScriptRoot "web_app.py"
++$installDir = Join-Path $PSScriptRoot ".install"
++$pidFile = Join-Path $installDir "web-server.pid"
++$stdout = Join-Path $installDir "web-server.stdout.log"
++$stderr = Join-Path $installDir "web-server.stderr.log"
++
++New-Item -ItemType Directory -Force -Path $installDir | Out-Null
++
++function Test-WebService {
++    try {
++        $response = Invoke-RestMethod -Uri "$url/api/health" -TimeoutSec 1
++        return [bool]$response.ok
++    }
++    catch {
++        return $false
++    }
++}
++
++if (-not (Test-WebService)) {
++    $startParameters = @{
++        FilePath = $python
++        ArgumentList = @($app, "--host", $hostName, "--port", $Port)
++        WorkingDirectory = $PSScriptRoot
++        WindowStyle = "Hidden"
++        RedirectStandardOutput = $stdout
++        RedirectStandardError = $stderr
++        PassThru = $true
++    }
++    $process = Start-Process @startParameters
++    Set-Content -LiteralPath $pidFile -Value $process.Id -Encoding ascii
++
++    $ready = $false
++    for ($attempt = 0; $attempt -lt 30; $attempt += 1) {
++        Start-Sleep -Milliseconds 500
++        if (Test-WebService) {
++            $ready = $true
++            break
++        }
++        if ($process.HasExited) {
++            break
++        }
++    }
++    if (-not $ready) {
++        throw "Web service failed to start. See $stderr"
++    }
++}
++
++Start-Process $url
++Write-Output "XHS-Downloader Web is running at $url"
+diff --git a/stop-web.ps1 b/stop-web.ps1
+new file mode 100644
+index 0000000..e06edab
+--- /dev/null
++++ b/stop-web.ps1
+@@ -0,0 +1,19 @@
++[CmdletBinding()]
++param()
++
++$ErrorActionPreference = "Stop"
++$pidFile = Join-Path $PSScriptRoot ".install\web-server.pid"
++
++if (-not (Test-Path -LiteralPath $pidFile)) {
++    Write-Output "No managed XHS-Downloader Web process is recorded."
++    exit 0
++}
++
++$processId = [int](Get-Content -Raw -LiteralPath $pidFile)
++$process = Get-Process -Id $processId -ErrorAction SilentlyContinue
++if ($process) {
++    Stop-Process -Id $processId
++    [void]$process.WaitForExit(10000)
++}
++Remove-Item -LiteralPath $pidFile -Force
++Write-Output "XHS-Downloader Web stopped."
+diff --git a/WEB_ROLLBACK.sh b/WEB_ROLLBACK.sh
+new file mode 100644
+index 0000000..6066ed3
+--- /dev/null
++++ b/WEB_ROLLBACK.sh
+@@ -0,0 +1,24 @@
++#!/usr/bin/env sh
++set -eu
++
++root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++
++for file in \
++    web_app.py \
++    start-web.ps1 \
++    stop-web.ps1 \
++    tests/test_web_app.py \
++    static/web/index.html \
++    static/web/styles.css \
++    static/web/app.js \
++    static/web/lucide.min.js \
++    static/web/logo.png \
++    WEB_APP.diff \
++    WEB_VERIFICATION.txt
++do
++    rm -f -- "$root/$file"
++done
++
++rm -f -- "$root/../Start-XHS-Web.cmd" "$root/../Stop-XHS-Web.cmd"
++rmdir "$root/static/web" 2>/dev/null || true
++printf '%s\n' "Restored pre-web behavior: web runtime, page assets, tests, and launchers removed; rollback record retained"
+diff --git a/tests/test_web_app.py b/tests/test_web_app.py
+new file mode 100644
+index 0000000..e578f21
+--- /dev/null
++++ b/tests/test_web_app.py
+@@ -0,0 +1,133 @@
++import tempfile
++import unittest
++from pathlib import Path
++from zipfile import ZipFile
++
++from fastapi.testclient import TestClient
++
++from web_app import create_app
++
++
++class FakeRuntime:
++    def __init__(self, root: Path):
++        self.root = root
++        self.started = False
++        self.stopped = False
++        self.accepted = True
++        self.cookie_configured = False
++
++    def start(self):
++        self.started = True
++
++    def stop(self):
++        self.stopped = True
++
++    def snapshot(self):
++        return {
++            "disclaimer_accepted": self.accepted,
++            "tasks": [],
++            "files": [],
++            "settings": {
++                "effective_work_path": str(self.root.parent),
++                "folder_name": self.root.name,
++                "cookie_configured": self.cookie_configured,
++            },
++        }
++
++    def create_tasks(self, content, index):
++        if "xiaohongshu.com" not in content and "xhslink.com" not in content:
++            return []
++        return [{"task_id": "job-1", "url": content, "state": "pending"}]
++
++    def cancel_task(self, task_id):
++        return task_id == "job-1"
++
++    def clear_finished(self):
++        return 2
++
++    def paste_content(self):
++        return "https://www.xiaohongshu.com/explore/example"
++
++    def accept_disclaimer(self):
++        self.accepted = True
++        return {"accepted": True}
++
++    def save_cookie(self, cookie):
++        self.cookie_configured = bool(cookie)
++        return {"ok": True}
++
++    def open_download_folder(self):
++        return True
++
++    def download_root(self):
++        return self.root
++
++
++class WebAppTests(unittest.TestCase):
++    def setUp(self):
++        self.temporary = tempfile.TemporaryDirectory()
++        self.download_root = Path(self.temporary.name) / "Download"
++        self.download_root.mkdir()
++        self.runtime = FakeRuntime(self.download_root)
++        self.client_context = TestClient(create_app(runtime=self.runtime))
++        self.client = self.client_context.__enter__()
++
++    def tearDown(self):
++        self.client_context.__exit__(None, None, None)
++        self.temporary.cleanup()
++
++    def test_health_page_and_runtime_lifecycle(self):
++        self.assertTrue(self.runtime.started)
++        response = self.client.get("/api/health")
++        self.assertEqual(response.status_code, 200)
++        self.assertTrue(response.json()["ok"])
++        page = self.client.get("/")
++        self.assertEqual(page.status_code, 200)
++        self.assertIn("小红书素材下载", page.text)
++
++    def test_task_clipboard_cookie_and_clear_endpoints(self):
++        invalid = self.client.post("/api/tasks", json={"content": "not a link"})
++        self.assertEqual(invalid.status_code, 422)
++        created = self.client.post(
++            "/api/tasks",
++            json={"content": "https://www.xiaohongshu.com/explore/example"},
++        )
++        self.assertEqual(created.status_code, 202)
++        self.assertEqual(created.json()["tasks"][0]["task_id"], "job-1")
++        self.assertIn("xiaohongshu.com", self.client.post("/api/clipboard").json()["content"])
++        saved = self.client.put("/api/settings/cookie", json={"cookie": "web_session=test"})
++        self.assertTrue(saved.json()["cookie_configured"])
++        self.assertEqual(self.client.delete("/api/tasks").json()["removed"], 2)
++
++    def test_library_file_download_and_archive(self):
++        image = self.download_root / "note" / "image.webp"
++        image.parent.mkdir()
++        image.write_bytes(b"RIFF-test-WEBP")
++        note = self.download_root / "note" / "caption.md"
++        note.write_text("caption", encoding="utf-8")
++
++        library = self.client.get("/api/library").json()
++        self.assertEqual(library["total"], 2)
++        image_item = next(item for item in library["items"] if item["name"] == "image.webp")
++        downloaded = self.client.get(image_item["download_url"])
++        self.assertEqual(downloaded.content, b"RIFF-test-WEBP")
++
++        bundle = self.client.post(
++            "/api/archive",
++            json={"paths": ["note/image.webp", "note/caption.md"]},
++        )
++        self.assertEqual(bundle.status_code, 200)
++        archive_path = Path(self.temporary.name) / "result.zip"
++        archive_path.write_bytes(bundle.content)
++        with ZipFile(archive_path) as archive:
++            self.assertEqual(set(archive.namelist()), {"note/image.webp", "note/caption.md"})
++
++    def test_file_path_cannot_escape_download_root(self):
++        secret = self.download_root.parent / "secret.txt"
++        secret.write_text("secret", encoding="utf-8")
++        response = self.client.get("/files/%2E%2E/secret.txt")
++        self.assertEqual(response.status_code, 404)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/static/web/index.html b/static/web/index.html
+new file mode 100644
+index 0000000..7f0cda5
+--- /dev/null
++++ b/static/web/index.html
+@@ -0,0 +1,97 @@
++<!doctype html>
++<html lang="zh-CN">
++<head>
++    <meta charset="utf-8">
++    <meta name="viewport" content="width=device-width, initial-scale=1">
++    <meta name="theme-color" content="#d9273e">
++    <title>小红书素材下载</title>
++    <link rel="icon" href="/assets/logo.png">
++    <link rel="stylesheet" href="/assets/styles.css">
++</head>
++<body>
++<header class="app-header">
++    <div class="brand">
++        <img src="/assets/logo.png" alt="" width="42" height="42">
++        <div><h1>小红书素材下载</h1><p>XHS-Downloader Web</p></div>
++    </div>
++    <div class="header-actions">
++        <span class="service-status" id="serviceStatus"><i></i><span>正在连接</span></span>
++        <button class="icon-button" id="settingsButton" type="button" title="Cookie 设置" aria-label="Cookie 设置">
++            <i data-lucide="settings-2"></i>
++        </button>
++        <button class="icon-button" id="openFolderButton" type="button" title="打开下载目录" aria-label="打开下载目录">
++            <i data-lucide="folder-open"></i>
++        </button>
++    </div>
++</header>
++
++<main>
++    <section class="input-band" aria-labelledby="inputTitle">
++        <div class="section-heading input-heading">
++            <div><h2 id="inputTitle">新建下载</h2><p id="downloadRoot">正在读取下载目录</p></div>
++            <span class="quality-badge"><i data-lucide="badge-check"></i> 原始格式</span>
++        </div>
++        <label class="url-field" for="urlInput">
++            <span>笔记链接</span>
++            <textarea id="urlInput" rows="3" placeholder="粘贴小红书笔记链接或包含链接的分享文本" autocomplete="off"></textarea>
++        </label>
++        <div class="input-actions">
++            <div class="secondary-actions">
++                <button class="button secondary" id="pasteButton" type="button"><i data-lucide="clipboard-paste"></i>粘贴</button>
++                <button class="icon-button subtle" id="clearInputButton" type="button" title="清空链接" aria-label="清空链接"><i data-lucide="x"></i></button>
++            </div>
++            <button class="button primary" id="downloadButton" type="button"><i data-lucide="download"></i>开始下载</button>
++        </div>
++    </section>
++
++    <section class="content-section" aria-labelledby="taskTitle">
++        <div class="section-heading">
++            <div><h2 id="taskTitle">下载任务</h2><p id="taskSummary">暂无任务</p></div>
++            <button class="icon-button subtle" id="clearTasksButton" type="button" title="清理已结束任务" aria-label="清理已结束任务"><i data-lucide="list-x"></i></button>
++        </div>
++        <div class="task-list" id="taskList" aria-live="polite">
++            <div class="empty-state"><i data-lucide="inbox"></i><span>暂无下载任务</span></div>
++        </div>
++    </section>
++
++    <section class="content-section library-section" aria-labelledby="libraryTitle">
++        <div class="section-heading library-heading">
++            <div><h2 id="libraryTitle">已下载文件</h2><p id="librarySummary">正在读取</p></div>
++            <div class="library-actions">
++                <label class="search-field"><i data-lucide="search"></i><input id="fileSearch" type="search" placeholder="搜索文件"></label>
++                <button class="button secondary" id="archiveButton" type="button" disabled><i data-lucide="archive"></i>打包下载</button>
++                <button class="icon-button subtle" id="refreshLibraryButton" type="button" title="刷新文件" aria-label="刷新文件"><i data-lucide="refresh-cw"></i></button>
++            </div>
++        </div>
++        <div class="file-table-wrap">
++            <table class="file-table">
++                <thead><tr><th class="select-cell"><input id="selectAllFiles" type="checkbox" aria-label="全选文件"></th><th>文件名</th><th>格式</th><th>大小</th><th>修改时间</th><th class="action-cell"></th></tr></thead>
++                <tbody id="fileList"></tbody>
++            </table>
++            <div class="empty-state" id="fileEmpty"><i data-lucide="folder-search"></i><span>暂无已下载文件</span></div>
++        </div>
++    </section>
++</main>
++
++<dialog id="settingsDialog">
++    <form method="dialog" class="dialog-shell" id="cookieForm">
++        <div class="dialog-heading"><div><h2>Cookie 设置</h2><p id="cookieState">未配置</p></div><button class="icon-button subtle" value="cancel" aria-label="关闭"><i data-lucide="x"></i></button></div>
++        <label class="url-field" for="cookieInput"><span>小红书网页 Cookie</span><textarea id="cookieInput" rows="5" placeholder="粘贴 Cookie；留空并保存可清除" autocomplete="off"></textarea></label>
++        <div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button class="button primary" id="saveCookieButton" type="submit"><i data-lucide="save"></i>保存</button></div>
++    </form>
++</dialog>
++
++<dialog id="disclaimerDialog">
++    <form method="dialog" class="dialog-shell compact">
++        <div class="dialog-heading"><div><h2>首次使用确认</h2><p>GNU General Public License v3.0</p></div></div>
++        <p class="dialog-copy">下载任务仅处理你提交的公开链接。继续使用即表示你同意 XHS-Downloader 项目的使用声明。</p>
++        <div class="dialog-actions"><button class="button primary" id="acceptDisclaimerButton" type="button">同意并继续</button></div>
++    </form>
++</dialog>
++
++<div class="toast" id="toast" role="status" aria-live="polite"></div>
++
++<script src="/assets/lucide.min.js"></script>
++<script src="/assets/app.js"></script>
++</body>
++</html>
+diff --git a/static/web/styles.css b/static/web/styles.css
+new file mode 100644
+index 0000000..f983a81
+--- /dev/null
++++ b/static/web/styles.css
+@@ -0,0 +1,148 @@
++:root {
++    color-scheme: light;
++    --bg: #f6f7f9;
++    --surface: #ffffff;
++    --text: #202124;
++    --muted: #6f737a;
++    --line: #dfe2e6;
++    --line-strong: #c8cdd3;
++    --primary: #d9273e;
++    --primary-hover: #b91f34;
++    --success: #18794e;
++    --success-soft: #e8f5ee;
++    --warning: #9a6700;
++    --warning-soft: #fff7d6;
++    --danger-soft: #fff0f1;
++    --info: #1769aa;
++    --radius: 6px;
++    --shadow: 0 12px 36px rgba(32, 33, 36, 0.14);
++    font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
++}
++
++* { box-sizing: border-box; }
++body { margin: 0; min-width: 320px; background: var(--bg); color: var(--text); font-size: 14px; }
++button, input, textarea { font: inherit; letter-spacing: 0; }
++button { cursor: pointer; }
++button:disabled { cursor: not-allowed; opacity: .48; }
++
++.app-header {
++    height: 70px;
++    display: flex;
++    align-items: center;
++    justify-content: space-between;
++    padding: 0 max(22px, calc((100vw - 1160px) / 2));
++    background: var(--surface);
++    border-bottom: 1px solid var(--line);
++    position: sticky;
++    top: 0;
++    z-index: 10;
++}
++.brand, .header-actions, .input-actions, .secondary-actions, .library-actions, .service-status, .quality-badge { display: flex; align-items: center; }
++.brand { gap: 11px; min-width: 0; }
++.brand img { border-radius: var(--radius); flex: 0 0 auto; }
++.brand h1 { margin: 0; font-size: 17px; line-height: 1.25; letter-spacing: 0; }
++.brand p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
++.header-actions { gap: 8px; }
++.service-status { gap: 7px; color: var(--muted); font-size: 12px; margin-right: 4px; }
++.service-status i { width: 8px; height: 8px; border-radius: 50%; background: #a8adb4; }
++.service-status.online i { background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
++.service-status.error i { background: var(--primary); box-shadow: 0 0 0 3px var(--danger-soft); }
++
++main { max-width: 1160px; margin: 0 auto; padding: 24px 22px 54px; }
++.input-band { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; }
++.content-section { padding: 28px 0 0; }
++.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 14px; }
++.section-heading h2 { margin: 0; font-size: 16px; line-height: 1.35; letter-spacing: 0; }
++.section-heading p { margin: 4px 0 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
++.quality-badge { gap: 6px; min-height: 28px; padding: 0 9px; color: var(--success); background: var(--success-soft); border-radius: 4px; font-size: 12px; white-space: nowrap; }
++.quality-badge svg { width: 15px; height: 15px; }
++
++.url-field { display: grid; gap: 8px; color: #3b3e43; font-weight: 600; font-size: 13px; }
++textarea { width: 100%; resize: vertical; min-height: 84px; padding: 12px 13px; color: var(--text); background: #fbfbfc; border: 1px solid var(--line-strong); border-radius: var(--radius); outline: none; line-height: 1.55; }
++textarea:focus, input:focus { border-color: var(--info); box-shadow: 0 0 0 3px rgba(23, 105, 170, .12); }
++.input-actions { justify-content: space-between; gap: 12px; margin-top: 14px; }
++.secondary-actions, .library-actions { gap: 8px; }
++.button, .icon-button { border: 1px solid transparent; border-radius: var(--radius); display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 38px; transition: background-color .16s ease, border-color .16s ease, color .16s ease; }
++.button { padding: 0 14px; font-weight: 600; }
++.button svg, .icon-button svg { width: 17px; height: 17px; }
++.button.primary { color: white; background: var(--primary); border-color: var(--primary); }
++.button.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
++.button.secondary { color: #34373b; background: var(--surface); border-color: var(--line-strong); }
++.button.secondary:hover, .icon-button:hover { background: #f0f2f4; }
++.icon-button { width: 38px; padding: 0; color: #52565c; background: var(--surface); border-color: var(--line); }
++.icon-button.subtle { background: transparent; border-color: transparent; }
++
++.task-list { border-top: 1px solid var(--line); }
++.task-row { display: grid; grid-template-columns: minmax(210px, 1.5fr) minmax(170px, 1fr) 110px 40px; gap: 20px; align-items: center; min-height: 76px; border-bottom: 1px solid var(--line); }
++.task-name { min-width: 0; }
++.task-name strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
++.task-name span, .progress-meta { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; }
++.task-progress { min-width: 0; }
++.progress-track { height: 6px; overflow: hidden; background: #e4e7ea; border-radius: 3px; }
++.progress-bar { height: 100%; width: 0; background: var(--info); border-radius: inherit; transition: width .25s ease; }
++.state-pill { justify-self: start; min-width: 76px; padding: 5px 8px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: 600; background: #eceff2; color: #555a60; }
++.state-pill.processing { background: #e9f3fb; color: var(--info); }
++.state-pill.success { background: var(--success-soft); color: var(--success); }
++.state-pill.failed { background: var(--danger-soft); color: var(--primary); }
++.state-pill.skipped { background: var(--warning-soft); color: var(--warning); }
++
++.library-heading { align-items: flex-end; }
++.search-field { height: 38px; width: 230px; display: flex; align-items: center; gap: 7px; padding: 0 10px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--muted); }
++.search-field:focus-within { border-color: var(--info); box-shadow: 0 0 0 3px rgba(23, 105, 170, .12); }
++.search-field svg { width: 16px; height: 16px; flex: 0 0 auto; }
++.search-field input { min-width: 0; width: 100%; border: 0; outline: 0; background: transparent; box-shadow: none; }
++.file-table-wrap { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow-x: auto; }
++.file-table { width: 100%; min-width: 760px; border-collapse: collapse; }
++.file-table th { height: 42px; color: var(--muted); background: #f7f8fa; font-size: 12px; font-weight: 600; text-align: left; border-bottom: 1px solid var(--line); }
++.file-table td { height: 54px; border-bottom: 1px solid var(--line); }
++.file-table tbody tr:last-child td { border-bottom: 0; }
++.file-table th, .file-table td { padding: 0 12px; }
++.file-table .select-cell { width: 42px; text-align: center; }
++.file-table .action-cell { width: 54px; text-align: center; }
++.file-name { max-width: 480px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
++.file-kind { text-transform: uppercase; color: var(--info); font-size: 12px; font-weight: 700; }
++.file-download { color: var(--primary); }
++.file-download svg { width: 18px; height: 18px; }
++.file-download:hover { color: var(--primary-hover); }
++input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--primary); }
++
++.empty-state { min-height: 120px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 9px; color: #969ba2; }
++.empty-state svg { width: 24px; height: 24px; }
++.file-table:not([hidden]) + .empty-state { display: none; }
++.file-table[hidden] + .empty-state { display: flex; }
++
++dialog { width: min(560px, calc(100vw - 30px)); padding: 0; border: 0; border-radius: 8px; box-shadow: var(--shadow); }
++dialog::backdrop { background: rgba(22, 24, 27, .45); }
++.dialog-shell { padding: 22px; }
++.dialog-shell.compact { max-width: 460px; }
++.dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 20px; }
++.dialog-heading h2 { margin: 0; font-size: 17px; }
++.dialog-heading p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
++.dialog-copy { margin: 0; color: #4e5258; line-height: 1.7; }
++.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
++.toast { position: fixed; right: 22px; bottom: 22px; max-width: min(390px, calc(100vw - 44px)); padding: 11px 14px; color: white; background: #30343a; border-radius: var(--radius); box-shadow: var(--shadow); opacity: 0; transform: translateY(8px); pointer-events: none; transition: .2s ease; z-index: 30; }
++.toast.show { opacity: 1; transform: translateY(0); }
++.toast.error { background: #9f1d31; }
++
++@media (max-width: 760px) {
++    .app-header { height: 62px; padding: 0 14px; }
++    .brand img { width: 36px; height: 36px; }
++    .brand h1 { font-size: 15px; }
++    .brand p, .service-status span { display: none; }
++    main { padding: 16px 14px 40px; }
++    .input-band { padding: 16px; }
++    .input-heading, .library-heading { align-items: flex-start; }
++    .library-heading { flex-direction: column; }
++    .library-actions { width: 100%; flex-wrap: wrap; }
++    .search-field { width: 100%; }
++    .task-row { grid-template-columns: minmax(0, 1fr) 76px 38px; gap: 10px; padding: 12px 0; }
++    .task-progress { grid-column: 1 / -1; grid-row: 2; }
++    .state-pill { grid-column: 2; grid-row: 1; }
++    .task-row > .icon-button { grid-column: 3; grid-row: 1; }
++}
++
++@media (max-width: 430px) {
++    .quality-badge { display: none; }
++    .input-actions { align-items: stretch; }
++    .button.primary { flex: 1; }
++}
+diff --git a/static/web/app.js b/static/web/app.js
+new file mode 100644
+index 0000000..eff6b6b
+--- /dev/null
++++ b/static/web/app.js
+@@ -0,0 +1,322 @@
++const byId = (id) => document.getElementById(id);
++
++const elements = {
++    serviceStatus: byId("serviceStatus"),
++    downloadRoot: byId("downloadRoot"),
++    urlInput: byId("urlInput"),
++    downloadButton: byId("downloadButton"),
++    pasteButton: byId("pasteButton"),
++    clearInputButton: byId("clearInputButton"),
++    taskList: byId("taskList"),
++    taskSummary: byId("taskSummary"),
++    clearTasksButton: byId("clearTasksButton"),
++    fileList: byId("fileList"),
++    fileEmpty: byId("fileEmpty"),
++    fileSearch: byId("fileSearch"),
++    librarySummary: byId("librarySummary"),
++    selectAllFiles: byId("selectAllFiles"),
++    archiveButton: byId("archiveButton"),
++    refreshLibraryButton: byId("refreshLibraryButton"),
++    openFolderButton: byId("openFolderButton"),
++    settingsButton: byId("settingsButton"),
++    settingsDialog: byId("settingsDialog"),
++    cookieForm: byId("cookieForm"),
++    cookieInput: byId("cookieInput"),
++    cookieState: byId("cookieState"),
++    disclaimerDialog: byId("disclaimerDialog"),
++    acceptDisclaimerButton: byId("acceptDisclaimerButton"),
++    toast: byId("toast"),
++};
++
++let currentState = null;
++let libraryItems = [];
++let selectedFiles = new Set();
++let toastTimer = null;
++let previousTaskFingerprint = "";
++
++function refreshIcons() {
++    if (window.lucide) window.lucide.createIcons({ attrs: { "stroke-width": 1.8 } });
++}
++
++async function api(path, options = {}) {
++    const response = await fetch(path, {
++        ...options,
++        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
++    });
++    if (!response.ok) {
++        let message = `请求失败 (${response.status})`;
++        try { message = (await response.json()).detail || message; } catch (_) { /* no-op */ }
++        throw new Error(message);
++    }
++    return response.status === 204 ? null : response.json();
++}
++
++function showToast(message, error = false) {
++    clearTimeout(toastTimer);
++    elements.toast.textContent = message;
++    elements.toast.className = `toast show${error ? " error" : ""}`;
++    toastTimer = setTimeout(() => { elements.toast.className = "toast"; }, 3200);
++}
++
++function formatBytes(value) {
++    if (!Number.isFinite(value) || value < 0) return "-";
++    if (value < 1024) return `${value} B`;
++    const units = ["KB", "MB", "GB", "TB"];
++    let size = value / 1024;
++    let unit = units[0];
++    for (let i = 1; i < units.length && size >= 1024; i += 1) { size /= 1024; unit = units[i]; }
++    return `${size >= 10 ? size.toFixed(1) : size.toFixed(2)} ${unit}`;
++}
++
++function formatTime(seconds) {
++    return new Intl.DateTimeFormat("zh-CN", {
++        year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
++    }).format(new Date(seconds * 1000));
++}
++
++function taskLabel(state) {
++    return { pending: "等待中", processing: "下载中", success: "已完成", failed: "失败", skipped: "已存在", cancelled: "已取消" }[state] || state;
++}
++
++function taskProgress(task) {
++    const files = (currentState?.files || []).filter((item) => item.task_id === task.task_id);
++    if (!files.length) return { percent: task.state === "success" ? 100 : 0, detail: "等待文件信息" };
++    let completed = 0;
++    let total = 0;
++    let known = true;
++    files.forEach((file) => {
++        completed += file.completed_bytes || 0;
++        if (file.total_bytes) total += file.total_bytes; else known = false;
++    });
++    const percent = task.state === "success" ? 100 : (known && total ? Math.min(100, completed / total * 100) : 0);
++    return { percent, detail: known && total ? `${formatBytes(completed)} / ${formatBytes(total)}` : `${files.length} 个文件` };
++}
++
++function createIconButton(iconName, title, onClick) {
++    const button = document.createElement("button");
++    button.type = "button";
++    button.className = "icon-button subtle";
++    button.title = title;
++    button.setAttribute("aria-label", title);
++    button.innerHTML = `<i data-lucide="${iconName}"></i>`;
++    button.addEventListener("click", onClick);
++    return button;
++}
++
++function renderTasks() {
++    const tasks = currentState?.tasks || [];
++    elements.taskList.replaceChildren();
++    const active = tasks.filter((task) => ["pending", "processing"].includes(task.state)).length;
++    elements.taskSummary.textContent = tasks.length ? `${tasks.length} 个任务，${active} 个进行中` : "暂无任务";
++    if (!tasks.length) {
++        elements.taskList.innerHTML = '<div class="empty-state"><i data-lucide="inbox"></i><span>暂无下载任务</span></div>';
++        refreshIcons();
++        return;
++    }
++    [...tasks].reverse().forEach((task) => {
++        const progress = taskProgress(task);
++        const row = document.createElement("div");
++        row.className = "task-row";
++
++        const name = document.createElement("div");
++        name.className = "task-name";
++        const strong = document.createElement("strong");
++        strong.textContent = task.display_text || task.url;
++        strong.title = task.url;
++        const source = document.createElement("span");
++        source.textContent = task.source === "monitor" ? "剪贴板监听" : "页面提交";
++        name.append(strong, source);
++
++        const progressCell = document.createElement("div");
++        progressCell.className = "task-progress";
++        progressCell.innerHTML = `<div class="progress-track"><div class="progress-bar" style="width:${progress.percent}%"></div></div><span class="progress-meta">${progress.detail}</span>`;
++
++        const state = document.createElement("span");
++        state.className = `state-pill ${task.state}`;
++        state.textContent = taskLabel(task.state);
++
++        const cancel = createIconButton("x", "取消任务", async () => {
++            try { await api(`/api/tasks/${encodeURIComponent(task.task_id)}`, { method: "DELETE" }); await refreshState(); }
++            catch (error) { showToast(error.message, true); }
++        });
++        cancel.disabled = task.state !== "pending";
++        row.append(name, progressCell, state, cancel);
++        elements.taskList.append(row);
++    });
++    refreshIcons();
++}
++
++function filteredLibrary() {
++    const query = elements.fileSearch.value.trim().toLocaleLowerCase();
++    return query ? libraryItems.filter((item) => item.path.toLocaleLowerCase().includes(query)) : libraryItems;
++}
++
++function updateSelection() {
++    const visible = filteredLibrary();
++    const selectedVisible = visible.filter((item) => selectedFiles.has(item.path)).length;
++    elements.selectAllFiles.checked = visible.length > 0 && selectedVisible === visible.length;
++    elements.selectAllFiles.indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
++    elements.archiveButton.disabled = selectedFiles.size === 0;
++    elements.archiveButton.lastChild.textContent = selectedFiles.size ? `打包下载 (${selectedFiles.size})` : "打包下载";
++}
++
++function renderLibrary() {
++    const visible = filteredLibrary();
++    elements.fileList.replaceChildren();
++    const table = elements.fileList.closest("table");
++    table.hidden = visible.length === 0;
++    elements.librarySummary.textContent = `${libraryItems.length} / ${currentState?.libraryTotal ?? libraryItems.length} 个文件`;
++    visible.forEach((item) => {
++        const row = document.createElement("tr");
++        const selectCell = document.createElement("td");
++        selectCell.className = "select-cell";
++        const checkbox = document.createElement("input");
++        checkbox.type = "checkbox";
++        checkbox.checked = selectedFiles.has(item.path);
++        checkbox.setAttribute("aria-label", `选择 ${item.name}`);
++        checkbox.addEventListener("change", () => {
++            if (checkbox.checked) selectedFiles.add(item.path); else selectedFiles.delete(item.path);
++            updateSelection();
++        });
++        selectCell.append(checkbox);
++
++        const name = document.createElement("td");
++        const nameText = document.createElement("div");
++        nameText.className = "file-name";
++        nameText.textContent = item.name;
++        nameText.title = item.path;
++        name.append(nameText);
++
++        const kind = document.createElement("td");
++        kind.className = "file-kind";
++        kind.textContent = item.suffix;
++        const size = document.createElement("td");
++        size.textContent = formatBytes(item.size);
++        const time = document.createElement("td");
++        time.textContent = formatTime(item.modified);
++        const action = document.createElement("td");
++        action.className = "action-cell";
++        const link = document.createElement("a");
++        link.className = "file-download";
++        link.href = item.download_url;
++        link.download = item.name;
++        link.title = "下载文件";
++        link.setAttribute("aria-label", `下载 ${item.name}`);
++        link.innerHTML = '<i data-lucide="download"></i>';
++        action.append(link);
++        row.append(selectCell, name, kind, size, time, action);
++        elements.fileList.append(row);
++    });
++    updateSelection();
++    refreshIcons();
++}
++
++async function refreshState() {
++    try {
++        currentState = await api("/api/state");
++        elements.serviceStatus.className = "service-status online";
++        elements.serviceStatus.querySelector("span").textContent = "服务正常";
++        const settings = currentState.settings || {};
++        elements.downloadRoot.textContent = `${settings.effective_work_path || ""}\\${settings.folder_name || "Download"}`;
++        elements.cookieState.textContent = settings.cookie_configured ? "已配置" : "未配置";
++        if (!currentState.disclaimer_accepted && !elements.disclaimerDialog.open) elements.disclaimerDialog.showModal();
++        renderTasks();
++        const fingerprint = (currentState.tasks || []).map((task) => `${task.task_id}:${task.state}`).join("|");
++        if (fingerprint !== previousTaskFingerprint && /success|skipped/.test(fingerprint)) await refreshLibrary();
++        previousTaskFingerprint = fingerprint;
++    } catch (error) {
++        elements.serviceStatus.className = "service-status error";
++        elements.serviceStatus.querySelector("span").textContent = "服务异常";
++    }
++}
++
++async function refreshLibrary() {
++    try {
++        const result = await api("/api/library?limit=500");
++        libraryItems = result.items;
++        currentState = { ...(currentState || {}), libraryTotal: result.total };
++        selectedFiles = new Set([...selectedFiles].filter((path) => libraryItems.some((item) => item.path === path)));
++        renderLibrary();
++    } catch (error) { showToast(error.message, true); }
++}
++
++async function pasteLink() {
++    try {
++        let content = "";
++        if (navigator.clipboard?.readText) {
++            try { content = await navigator.clipboard.readText(); } catch (_) { /* server fallback */ }
++        }
++        if (!content) content = (await api("/api/clipboard", { method: "POST" })).content;
++        elements.urlInput.value = content || "";
++        elements.urlInput.focus();
++        if (!content) showToast("剪贴板中没有文本", true);
++    } catch (error) { showToast(error.message, true); }
++}
++
++async function createDownload() {
++    const content = elements.urlInput.value.trim();
++    if (!content) { showToast("请先粘贴笔记链接", true); elements.urlInput.focus(); return; }
++    elements.downloadButton.disabled = true;
++    try {
++        const result = await api("/api/tasks", { method: "POST", body: JSON.stringify({ content }) });
++        showToast(`已创建 ${result.tasks.length} 个下载任务`);
++        elements.urlInput.value = "";
++        await refreshState();
++    } catch (error) { showToast(error.message, true); }
++    finally { elements.downloadButton.disabled = false; }
++}
++
++async function downloadArchive() {
++    if (!selectedFiles.size) return;
++    elements.archiveButton.disabled = true;
++    try {
++        const response = await fetch("/api/archive", {
++            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths: [...selectedFiles] }),
++        });
++        if (!response.ok) throw new Error((await response.json()).detail || "打包失败");
++        const url = URL.createObjectURL(await response.blob());
++        const link = document.createElement("a");
++        link.href = url;
++        link.download = "xiaohongshu-download.zip";
++        link.click();
++        URL.revokeObjectURL(url);
++    } catch (error) { showToast(error.message, true); }
++    finally { updateSelection(); }
++}
++
++elements.pasteButton.addEventListener("click", pasteLink);
++elements.clearInputButton.addEventListener("click", () => { elements.urlInput.value = ""; elements.urlInput.focus(); });
++elements.downloadButton.addEventListener("click", createDownload);
++elements.urlInput.addEventListener("keydown", (event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") createDownload(); });
++elements.clearTasksButton.addEventListener("click", async () => { try { await api("/api/tasks", { method: "DELETE" }); await refreshState(); } catch (error) { showToast(error.message, true); } });
++elements.fileSearch.addEventListener("input", renderLibrary);
++elements.refreshLibraryButton.addEventListener("click", refreshLibrary);
++elements.selectAllFiles.addEventListener("change", () => {
++    filteredLibrary().forEach((item) => { if (elements.selectAllFiles.checked) selectedFiles.add(item.path); else selectedFiles.delete(item.path); });
++    renderLibrary();
++});
++elements.archiveButton.addEventListener("click", downloadArchive);
++elements.openFolderButton.addEventListener("click", async () => { try { await api("/api/folder/open", { method: "POST" }); } catch (error) { showToast(error.message, true); } });
++elements.settingsButton.addEventListener("click", () => { elements.cookieInput.value = ""; elements.settingsDialog.showModal(); });
++elements.cookieForm.addEventListener("submit", async (event) => {
++    event.preventDefault();
++    try {
++        const result = await api("/api/settings/cookie", { method: "PUT", body: JSON.stringify({ cookie: elements.cookieInput.value }) });
++        elements.cookieState.textContent = result.cookie_configured ? "已配置" : "未配置";
++        elements.cookieInput.value = "";
++        elements.settingsDialog.close();
++        showToast("Cookie 设置已保存");
++    } catch (error) { showToast(error.message, true); }
++});
++elements.acceptDisclaimerButton.addEventListener("click", async () => {
++    elements.acceptDisclaimerButton.disabled = true;
++    try { await api("/api/disclaimer/accept", { method: "POST" }); elements.disclaimerDialog.close(); await refreshState(); }
++    catch (error) { showToast(error.message, true); }
++    finally { elements.acceptDisclaimerButton.disabled = false; }
++});
++
++refreshIcons();
++Promise.all([refreshState(), refreshLibrary()]).finally(() => {
++    setInterval(refreshState, 1000);
++    setInterval(refreshLibrary, 5000);
++});
+diff --git a/../Start-XHS-Web.cmd b/../Start-XHS-Web.cmd
+new file mode 100644
+index 0000000..4f35f2b
+--- /dev/null
++++ b/../Start-XHS-Web.cmd
+@@ -0,0 +1,3 @@
++@echo off
++powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0XHS-Downloader\start-web.ps1"
++if errorlevel 1 pause
+diff --git a/../Stop-XHS-Web.cmd b/../Stop-XHS-Web.cmd
+new file mode 100644
+index 0000000..5ca7772
+--- /dev/null
++++ b/../Stop-XHS-Web.cmd
+@@ -0,0 +1,3 @@
++@echo off
++powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0XHS-Downloader\stop-web.ps1"
++if errorlevel 1 pause

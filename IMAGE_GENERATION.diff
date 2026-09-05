@@ -1,0 +1,844 @@
+diff --git a/.install/image-gen-baseline/ai_gateway.py b/ai_gateway.py
+index 9398cd1..07d8c0e 100644
+--- a/.install/image-gen-baseline/ai_gateway.py
++++ b/ai_gateway.py
+@@ -10,6 +10,7 @@ from time import perf_counter
+ from urllib.error import HTTPError, URLError
+ from urllib.parse import urlsplit, urlunsplit
+ from urllib.request import Request, urlopen
++from uuid import uuid4
+ 
+ 
+ class AIConfigError(ValueError):
+@@ -62,6 +63,7 @@ class AIConfigStore:
+         api_key: str = "",
+         clear_api_key: bool = False,
+         protocol: str = "responses",
++        image_model: str = "",
+     ) -> dict:
+         normalized_url = normalize_base_url(base_url)
+         normalized_model = model.strip()
+@@ -73,6 +75,7 @@ class AIConfigStore:
+             config["base_url"] = normalized_url
+             config["model"] = normalized_model
+             config["protocol"] = normalized_protocol
++            config["image_model"] = image_model.strip()
+             if clear_api_key:
+                 config["api_key"] = ""
+             elif api_key.strip():
+@@ -92,6 +95,7 @@ class AIConfigStore:
+             "base_url": "",
+             "api_key": "",
+             "model": "",
++            "image_model": "",
+             "protocol": "responses",
+         }
+         if not self.path.is_file():
+@@ -131,11 +135,16 @@ class AIConfigStore:
+         return {
+             "base_url": base_url,
+             "model": config["model"],
++            "image_model": config["image_model"],
+             "protocol": protocol,
+             "api_key_configured": key_configured,
+             "configured": bool(base_url and key_configured and config["model"]),
++            "image_configured": bool(
++                base_url and key_configured and config["image_model"]
++            ),
+             "models_url": f"{base_url}/models" if base_url else "",
+             "request_url": f"{base_url}/{endpoint}" if base_url else "",
++            "image_request_url": (f"{base_url}/images/generations" if base_url else ""),
+         }
+ 
+ 
+@@ -160,6 +169,7 @@ class AIGateway:
+         api_key: str = "",
+         clear_api_key: bool = False,
+         protocol: str = "responses",
++        image_model: str = "",
+     ) -> dict:
+         return self.store.update(
+             base_url,
+@@ -167,6 +177,7 @@ class AIGateway:
+             api_key,
+             clear_api_key,
+             protocol,
++            image_model,
+         )
+ 
+     def test_connection(self) -> dict:
+@@ -212,6 +223,7 @@ class AIGateway:
+             ) from error
+ 
+         configured_model = config["model"]
++        configured_image_model = config["image_model"]
+         return {
+             "ok": True,
+             "latency_ms": round((perf_counter() - started) * 1000),
+@@ -219,6 +231,9 @@ class AIGateway:
+             "model_available": (
+                 configured_model in model_ids if configured_model else None
+             ),
++            "image_model_available": (
++                configured_image_model in model_ids if configured_image_model else None
++            ),
+         }
+ 
+     def generate(
+@@ -259,7 +274,54 @@ class AIGateway:
+             "images_used": len(images),
+         }
+ 
+-    def _post_json(self, url: str, api_key: str, payload: dict) -> dict:
++    def generate_image(
++        self,
++        source_text: str,
++        instructions: str,
++        images: list[tuple[str, bytes]],
++        size: str,
++        quality: str,
++    ) -> dict:
++        config = self.store.connection_config()
++        if not config["image_model"]:
++            raise AIConfigError("请先配置图片模型")
++        prompt = self._image_prompt(source_text, instructions, bool(images))
++        fields = {
++            "model": config["image_model"],
++            "prompt": prompt,
++            "size": size,
++            "quality": quality,
++            "n": "1",
++        }
++        if images:
++            response = self._post_multipart(
++                f"{config['base_url']}/images/edits",
++                config["api_key"],
++                fields,
++                images,
++            )
++        else:
++            response = self._post_json(
++                f"{config['base_url']}/images/generations",
++                config["api_key"],
++                {**fields, "n": 1},
++                max_response_bytes=50 * 1024 * 1024,
++            )
++        image_data, revised_prompt = self._extract_generated_image(response)
++        return {
++            "data": image_data,
++            "model": config["image_model"],
++            "revised_prompt": revised_prompt,
++            "references_used": len(images),
++        }
++
++    def _post_json(
++        self,
++        url: str,
++        api_key: str,
++        payload: dict,
++        max_response_bytes: int = 8 * 1024 * 1024,
++    ) -> dict:
+         request = Request(
+             url,
+             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+@@ -271,9 +333,59 @@ class AIGateway:
+             },
+             method="POST",
+         )
++        return self._read_json_response(request, max_response_bytes)
++
++    def _post_multipart(
++        self,
++        url: str,
++        api_key: str,
++        fields: dict[str, str],
++        images: list[tuple[str, bytes]],
++    ) -> dict:
++        boundary = f"----XHSDownloader{uuid4().hex}"
++        body = bytearray()
++        for name, value in fields.items():
++            body.extend(f"--{boundary}\r\n".encode())
++            body.extend(
++                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
++            )
++            body.extend(str(value).encode("utf-8"))
++            body.extend(b"\r\n")
++        extensions = {
++            "image/jpeg": "jpg",
++            "image/png": "png",
++            "image/webp": "webp",
++        }
++        for index, (mime_type, data) in enumerate(images, start=1):
++            extension = extensions.get(mime_type, "png")
++            body.extend(f"--{boundary}\r\n".encode())
++            body.extend(
++                (
++                    'Content-Disposition: form-data; name="image[]"; '
++                    f'filename="reference-{index}.{extension}"\r\n'
++                ).encode()
++            )
++            body.extend(f"Content-Type: {mime_type}\r\n\r\n".encode())
++            body.extend(data)
++            body.extend(b"\r\n")
++        body.extend(f"--{boundary}--\r\n".encode())
++        request = Request(
++            url,
++            data=bytes(body),
++            headers={
++                "Accept": "application/json",
++                "Authorization": f"Bearer {api_key}",
++                "Content-Type": f"multipart/form-data; boundary={boundary}",
++                "User-Agent": "XHS-Downloader-Web/2.8",
++            },
++            method="POST",
++        )
++        return self._read_json_response(request, 50 * 1024 * 1024)
++
++    def _read_json_response(self, request: Request, max_bytes: int) -> dict:
+         try:
+             with urlopen(request, timeout=self.generation_timeout) as response:
+-                body = response.read(8 * 1024 * 1024 + 1)
++                body = response.read(max_bytes + 1)
+         except HTTPError as error:
+             raise AIGatewayConnectionError(f"AI 中转返回 HTTP {error.code}") from error
+         except URLError as error:
+@@ -282,7 +394,7 @@ class AIGateway:
+             ) from error
+         except TimeoutError as error:
+             raise AIGatewayConnectionError("AI 生成请求超时") from error
+-        if len(body) > 8 * 1024 * 1024:
++        if len(body) > max_bytes:
+             raise AIGatewayConnectionError("AI 中转响应过大")
+         try:
+             parsed = json.loads(body)
+@@ -292,6 +404,34 @@ class AIGateway:
+             raise AIGatewayConnectionError("AI 中转响应格式错误")
+         return parsed
+ 
++    @staticmethod
++    def _image_prompt(source_text: str, instructions: str, has_references: bool) -> str:
++        parts = [source_text.strip() or "根据参考图片创作一张小红书配图"]
++        if instructions.strip():
++            parts.append(instructions.strip())
++        if has_references:
++            parts.append("参考随附图片中的主体、造型和视觉元素，重新构图并生成新图片。")
++        parts.append("画面完整清晰，不添加水印、平台标识或无关文字。")
++        return "\n\n".join(parts)
++
++    @staticmethod
++    def _extract_generated_image(payload: dict) -> tuple[bytes, str]:
++        items = payload.get("data")
++        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
++            raise AIGatewayConnectionError("图片接口没有返回图片数据")
++        item = items[0]
++        encoded = item.get("b64_json")
++        if not isinstance(encoded, str) or not encoded:
++            raise AIGatewayConnectionError("图片接口未返回 Base64 图片")
++        try:
++            image_data = base64.b64decode(encoded, validate=True)
++        except (ValueError, TypeError) as error:
++            raise AIGatewayConnectionError("图片接口返回的 Base64 数据无效") from error
++        if not image_data or len(image_data) > 32 * 1024 * 1024:
++            raise AIGatewayConnectionError("图片接口返回的图片大小无效")
++        revised_prompt = item.get("revised_prompt", "")
++        return image_data, revised_prompt if isinstance(revised_prompt, str) else ""
++
+     @staticmethod
+     def _user_prompt(source_text: str, instructions: str, mode: str) -> str:
+         action = (
+diff --git a/.install/image-gen-baseline/web_app.py b/web_app.py
+index d6e0fb6..775440f 100644
+--- a/.install/image-gen-baseline/web_app.py
++++ b/web_app.py
+@@ -2,9 +2,11 @@ from __future__ import annotations
+ 
+ import argparse
+ import asyncio
+-from mimetypes import guess_type
+ from contextlib import asynccontextmanager
++from datetime import datetime
++from mimetypes import guess_type
+ from pathlib import Path
++from secrets import token_hex
+ from tempfile import NamedTemporaryFile
+ from typing import Annotated, Literal, Protocol
+ from urllib.parse import quote
+@@ -140,6 +142,7 @@ class AIConfigRequest(BaseModel):
+     base_url: Annotated[str, Field(max_length=2_048)] = ""
+     api_key: Annotated[str, Field(max_length=32_000)] = ""
+     model: Annotated[str, Field(max_length=256)] = ""
++    image_model: Annotated[str, Field(max_length=256)] = ""
+     clear_api_key: bool = False
+     protocol: Annotated[str, Field(max_length=32)] = "responses"
+ 
+@@ -149,6 +152,9 @@ class AIGenerateRequest(BaseModel):
+     source_text: Annotated[str, Field(max_length=30_000)] = ""
+     instructions: Annotated[str, Field(max_length=5_000)] = ""
+     image_paths: Annotated[list[str], Field(max_length=4)] = Field(default_factory=list)
++    generate_image: bool = False
++    image_size: Literal["1024x1024", "1024x1536", "1536x1024"] = "1024x1024"
++    image_quality: Literal["low", "medium", "high"] = "low"
+ 
+ 
+ def _resolve_file(root: Path, relative_path: str) -> Path:
+@@ -163,6 +169,16 @@ def _resolve_file(root: Path, relative_path: str) -> Path:
+     return target
+ 
+ 
++def _generated_image_suffix(data: bytes) -> str:
++    if data.startswith(b"\x89PNG\r\n\x1a\n"):
++        return ".png"
++    if data.startswith(b"\xff\xd8\xff"):
++        return ".jpg"
++    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
++        return ".webp"
++    raise AIGatewayConnectionError("图片接口返回了不支持的文件格式")
++
++
+ def _library(runtime: Runtime, limit: int) -> dict:
+     root = runtime.download_root()
+     root.mkdir(parents=True, exist_ok=True)
+@@ -257,6 +273,9 @@ def create_app(
+             "enhancement": "lanczos_2x",
+             "ai_gateway": "openai_compatible",
+             "ai_configured": active_ai_gateway.public_config()["configured"],
++            "ai_image_configured": active_ai_gateway.public_config()[
++                "image_configured"
++            ],
+         }
+ 
+     @app.get("/api/state")
+@@ -320,6 +339,7 @@ def create_app(
+                 request.api_key,
+                 request.clear_api_key,
+                 request.protocol,
++                request.image_model,
+             )
+         except AIConfigError as error:
+             raise HTTPException(status_code=422, detail=str(error)) from error
+@@ -336,6 +356,8 @@ def create_app(
+ 
+     @app.post("/api/ai/generate")
+     def generate_ai_content(request: AIGenerateRequest) -> dict:
++        if request.generate_image and request.mode != "create":
++            raise HTTPException(status_code=422, detail="只有图文创作模式会生成图片")
+         root = active_runtime.download_root()
+         selected = [
+             _resolve_file(root, value) for value in dict.fromkeys(request.image_paths)
+@@ -362,7 +384,7 @@ def create_app(
+         if not request.source_text.strip() and not images:
+             raise HTTPException(status_code=422, detail="请输入内容或选择参考图片")
+         try:
+-            return active_ai_gateway.generate(
++            result = active_ai_gateway.generate(
+                 request.source_text,
+                 request.instructions,
+                 request.mode,
+@@ -372,6 +394,48 @@ def create_app(
+             raise HTTPException(status_code=409, detail=str(error)) from error
+         except AIGatewayConnectionError as error:
+             raise HTTPException(status_code=502, detail=str(error)) from error
++        result["generated_images"] = []
++        if not request.generate_image:
++            return result
++        try:
++            generated = active_ai_gateway.generate_image(
++                request.source_text.strip() or result["text"],
++                request.instructions,
++                images,
++                request.image_size,
++                request.image_quality,
++            )
++            image_data = generated.pop("data")
++            suffix = _generated_image_suffix(image_data)
++            output_dir = root / "AI生成"
++            output_dir.mkdir(parents=True, exist_ok=True)
++            name = f"AI_{datetime.now():%Y%m%d_%H%M%S}_{token_hex(3)}{suffix}"
++            target = output_dir / name
++            with NamedTemporaryFile(
++                dir=output_dir,
++                prefix=f".{name}.",
++                suffix=".tmp",
++                delete=False,
++            ) as temporary:
++                temporary.write(image_data)
++                temporary_path = Path(temporary.name)
++            temporary_path.replace(target)
++            relative = target.relative_to(root).as_posix()
++            result["generated_images"].append(
++                {
++                    "path": relative,
++                    "name": name,
++                    "size": len(image_data),
++                    "preview_url": "/media/" + quote(relative, safe="/"),
++                    "download_url": "/files/" + quote(relative, safe="/"),
++                }
++            )
++            result["image_model"] = generated["model"]
++            result["image_references_used"] = generated["references_used"]
++            result["revised_prompt"] = generated["revised_prompt"]
++        except (AIConfigError, AIGatewayConnectionError) as error:
++            result["image_error"] = str(error)
++        return result
+ 
+     @app.get("/api/enhancements")
+     def enhancements() -> dict:
+diff --git a/.install/image-gen-baseline/static/web/app.js b/static/web/app.js
+index 8973ee1..4990f50 100644
+--- a/.install/image-gen-baseline/static/web/app.js
++++ b/static/web/app.js
+@@ -25,10 +25,19 @@ const elements = {
+     aiSourceText: byId("aiSourceText"),
+     aiInstructions: byId("aiInstructions"),
+     aiGenerationModes: document.querySelectorAll('input[name="aiGenerationMode"]'),
++    aiImageOptions: byId("aiImageOptions"),
++    aiImageSize: byId("aiImageSize"),
++    aiImageQuality: byId("aiImageQuality"),
+     generateAIButton: byId("generateAIButton"),
++    generateAIButtonLabel: byId("generateAIButtonLabel"),
+     clearAIOutputButton: byId("clearAIOutputButton"),
+     copyAIOutputButton: byId("copyAIOutputButton"),
+     aiOutput: byId("aiOutput"),
++    aiImageResult: byId("aiImageResult"),
++    generatedImageMeta: byId("generatedImageMeta"),
++    generatedImagePreviewButton: byId("generatedImagePreviewButton"),
++    generatedImagePreview: byId("generatedImagePreview"),
++    generatedImageDownload: byId("generatedImageDownload"),
+     aiSettingsButton: byId("aiSettingsButton"),
+     aiSettingsDialog: byId("aiSettingsDialog"),
+     aiSettingsForm: byId("aiSettingsForm"),
+@@ -37,6 +46,7 @@ const elements = {
+     aiApiKey: byId("aiApiKey"),
+     clearAIKey: byId("clearAIKey"),
+     aiModel: byId("aiModel"),
++    aiImageModel: byId("aiImageModel"),
+     aiProtocols: document.querySelectorAll('input[name="aiProtocol"]'),
+     toggleAIKeyButton: byId("toggleAIKeyButton"),
+     testAIButton: byId("testAIButton"),
+@@ -485,13 +495,15 @@ async function createEnhancement() {
+ function renderAIConfig(config) {
+     elements.aiBaseUrl.value = config.base_url || "";
+     elements.aiModel.value = config.model || "";
++    elements.aiImageModel.value = config.image_model || "gpt-image-2";
+     elements.aiProtocols.forEach((input) => { input.checked = input.value === config.protocol; });
+     elements.aiApiKey.value = "";
+     elements.clearAIKey.checked = false;
+     elements.clearAIKey.disabled = !config.api_key_configured;
+     if (config.configured) {
+-        elements.aiConfigState.textContent = `已配置 · ${config.model}`;
+-        elements.aiGenerationState.textContent = `${config.model} · 可开始生成`;
++        const imageModel = config.image_model ? ` · 图片 ${config.image_model}` : "";
++        elements.aiConfigState.textContent = `已配置 · ${config.model}${imageModel}`;
++        elements.aiGenerationState.textContent = `${config.model}${imageModel} · 可开始生成`;
+     } else if (config.base_url || config.api_key_configured || config.model) {
+         elements.aiConfigState.textContent = "配置未完整";
+         elements.aiGenerationState.textContent = "AI 配置未完整";
+@@ -501,6 +513,36 @@ function renderAIConfig(config) {
+     }
+ }
+ 
++function syncAIGenerationMode() {
++    const createMode = [...elements.aiGenerationModes].some((input) => input.checked && input.value === "create");
++    elements.aiImageOptions.hidden = !createMode;
++    elements.generateAIButtonLabel.textContent = createMode ? "生成图文" : "生成内容";
++}
++
++function clearGeneratedImage() {
++    elements.aiImageResult.hidden = true;
++    elements.generatedImagePreview.removeAttribute("src");
++    elements.generatedImagePreviewButton.dataset.path = "";
++    elements.generatedImageDownload.href = "#";
++    elements.generatedImageDownload.removeAttribute("download");
++    elements.generatedImageMeta.textContent = "";
++}
++
++function renderGeneratedImage(item, model, size) {
++    if (!item) {
++        clearGeneratedImage();
++        return;
++    }
++    const [width, height] = size.split("x").map(Number);
++    elements.generatedImagePreviewButton.style.aspectRatio = `${width} / ${height}`;
++    elements.generatedImagePreview.src = item.preview_url;
++    elements.generatedImagePreviewButton.dataset.path = item.path;
++    elements.generatedImageMeta.textContent = `${model} · ${formatBytes(item.size)}`;
++    elements.generatedImageDownload.href = item.download_url;
++    elements.generatedImageDownload.download = item.name;
++    elements.aiImageResult.hidden = false;
++}
++
+ async function loadAIConfig() {
+     const config = await api("/api/ai/config");
+     renderAIConfig(config);
+@@ -516,10 +558,12 @@ async function generateAIContent() {
+         return;
+     }
+     const mode = [...elements.aiGenerationModes].find((input) => input.checked)?.value || "rewrite";
++    const generateImage = mode === "create";
+     elements.generateAIButton.disabled = true;
+     elements.copyAIOutputButton.disabled = true;
+-    elements.aiGenerationState.textContent = "正在生成内容";
+-    elements.aiOutput.placeholder = "AI 正在分析素材并生成内容...";
++    clearGeneratedImage();
++    elements.aiGenerationState.textContent = generateImage ? "正在生成文案和图片" : "正在生成内容";
++    elements.aiOutput.placeholder = generateImage ? "AI 正在生成文案和图片..." : "AI 正在分析素材并生成内容...";
+     try {
+         const result = await api("/api/ai/generate", {
+             method: "POST",
+@@ -528,13 +572,27 @@ async function generateAIContent() {
+                 source_text: sourceText,
+                 instructions: elements.aiInstructions.value.trim(),
+                 image_paths: imagePaths,
++                generate_image: generateImage,
++                image_size: elements.aiImageSize.value,
++                image_quality: elements.aiImageQuality.value,
+             }),
+         });
+         elements.aiOutput.value = result.text;
+         elements.copyAIOutputButton.disabled = !result.text;
+         const imageDetail = result.images_used ? ` · ${result.images_used} 张参考图` : "";
+-        elements.aiGenerationState.textContent = `生成完成 · ${result.model}${imageDetail}`;
+-        showToast("AI 内容已生成");
++        const generatedImage = result.generated_images?.[0];
++        if (generatedImage) {
++            renderGeneratedImage(generatedImage, result.image_model, elements.aiImageSize.value);
++            await refreshLibrary();
++            elements.aiGenerationState.textContent = `图文生成完成 · ${result.model}${imageDetail}`;
++            showToast("AI 文案和图片已生成");
++        } else if (result.image_error) {
++            elements.aiGenerationState.textContent = `文案已生成 · 图片生成失败`;
++            showToast(result.image_error, true);
++        } else {
++            elements.aiGenerationState.textContent = `生成完成 · ${result.model}${imageDetail}`;
++            showToast("AI 内容已生成");
++        }
+     } catch (error) {
+         elements.aiGenerationState.textContent = "生成失败";
+         showToast(error.message, true);
+@@ -567,6 +625,7 @@ async function persistAIConfig(closeDialog = true) {
+             base_url: elements.aiBaseUrl.value,
+             api_key: elements.aiApiKey.value,
+             model: elements.aiModel.value,
++            image_model: elements.aiImageModel.value,
+             clear_api_key: elements.clearAIKey.checked,
+             protocol: [...elements.aiProtocols].find((input) => input.checked)?.value || "responses",
+         }),
+@@ -594,8 +653,9 @@ async function testAIConnection() {
+         await persistAIConfig(false);
+         const result = await api("/api/ai/test", { method: "POST" });
+         const modelStatus = result.model_available === false ? "，默认模型未在列表中" : "";
++        const imageModelStatus = result.image_model_available === false ? "，图片模型未在列表中" : "";
+         elements.aiConfigState.textContent = `连接成功 · ${result.latency_ms} ms`;
+-        showToast(`AI 中转连接成功，共 ${result.models_count} 个模型${modelStatus}`);
++        showToast(`AI 中转连接成功，共 ${result.models_count} 个模型${modelStatus}${imageModelStatus}`);
+     } catch (error) {
+         elements.aiConfigState.textContent = "连接失败";
+         showToast(error.message, true);
+@@ -618,6 +678,7 @@ elements.selectAllFiles.addEventListener("change", () => {
+ });
+ elements.enhanceButton.addEventListener("click", createEnhancement);
+ elements.archiveButton.addEventListener("click", downloadArchive);
++elements.aiGenerationModes.forEach((input) => input.addEventListener("change", syncAIGenerationMode));
+ elements.generateAIButton.addEventListener("click", generateAIContent);
+ elements.copyAIOutputButton.addEventListener("click", () => {
+     copyAIOutput().catch((error) => showToast(error.message, true));
+@@ -625,8 +686,16 @@ elements.copyAIOutputButton.addEventListener("click", () => {
+ elements.clearAIOutputButton.addEventListener("click", () => {
+     elements.aiOutput.value = "";
+     elements.copyAIOutputButton.disabled = true;
++    clearGeneratedImage();
+     elements.aiOutput.focus();
+ });
++elements.generatedImagePreviewButton.addEventListener("click", async () => {
++    const path = elements.generatedImagePreviewButton.dataset.path;
++    if (!path) return;
++    await refreshLibrary();
++    const item = libraryItems.find((entry) => entry.path === path);
++    if (item) openMediaViewer(item);
++});
+ elements.openFolderButton.addEventListener("click", async () => { try { await api("/api/folder/open", { method: "POST" }); } catch (error) { showToast(error.message, true); } });
+ elements.aiSettingsButton.addEventListener("click", async () => {
+     elements.aiSettingsDialog.showModal();
+@@ -678,6 +747,7 @@ elements.acceptDisclaimerButton.addEventListener("click", async () => {
+     finally { elements.acceptDisclaimerButton.disabled = false; }
+ });
+ 
++syncAIGenerationMode();
+ refreshIcons();
+ Promise.all([refreshState(), refreshLibrary(), refreshEnhancements(), loadAIConfig()]).finally(() => {
+     setInterval(refreshState, 1000);
+diff --git a/.install/image-gen-baseline/static/web/index.html b/static/web/index.html
+index 8e54542..3e31c3b 100644
+--- a/.install/image-gen-baseline/static/web/index.html
++++ b/static/web/index.html
+@@ -59,13 +59,22 @@
+         <div class="ai-workspace">
+             <div class="ai-input-pane">
+                 <fieldset class="protocol-field"><legend>生成模式</legend><div class="segmented-control"><label><input type="radio" name="aiGenerationMode" value="rewrite" checked><span>内容改写</span></label><label><input type="radio" name="aiGenerationMode" value="create"><span>图文创作</span></label></div></fieldset>
++                <div class="ai-image-options" id="aiImageOptions" hidden>
++                    <label class="select-field" for="aiImageSize"><span>图片比例</span><select id="aiImageSize"><option value="1024x1024">方图 1:1</option><option value="1024x1536">竖图 2:3</option><option value="1536x1024">横图 3:2</option></select></label>
++                    <label class="select-field" for="aiImageQuality"><span>图片质量</span><select id="aiImageQuality"><option value="low">标准</option><option value="medium">精细</option><option value="high">高清</option></select></label>
++                </div>
+                 <label class="url-field" for="aiSourceText"><span>原始内容或主题</span><textarea id="aiSourceText" rows="6" placeholder="输入需要改写的正文，或填写创作主题"></textarea></label>
+                 <label class="url-field" for="aiInstructions"><span>补充要求</span><textarea id="aiInstructions" class="compact-textarea" rows="3" placeholder="语气、篇幅、受众或必须保留的信息"></textarea></label>
+-                <button class="button primary ai-generate-button" id="generateAIButton" type="button"><i data-lucide="sparkles"></i>生成内容</button>
++                <button class="button primary ai-generate-button" id="generateAIButton" type="button"><i data-lucide="sparkles"></i><span id="generateAIButtonLabel">生成内容</span></button>
+             </div>
+             <div class="ai-output-pane">
+                 <div class="output-heading"><span>生成结果</span><div><button class="icon-button subtle" id="clearAIOutputButton" type="button" title="清空生成结果" aria-label="清空生成结果"><i data-lucide="eraser"></i></button><button class="icon-button subtle" id="copyAIOutputButton" type="button" title="复制生成结果" aria-label="复制生成结果" disabled><i data-lucide="copy"></i></button></div></div>
+                 <textarea id="aiOutput" rows="14" placeholder="AI 生成结果将在这里显示" readonly></textarea>
++                <div class="ai-image-result" id="aiImageResult" hidden>
++                    <div class="generated-image-heading"><span>生成图片</span><span id="generatedImageMeta"></span></div>
++                    <button class="generated-image-preview" id="generatedImagePreviewButton" type="button" title="放大查看生成图片"><img id="generatedImagePreview" alt="AI 生成图片"></button>
++                    <a class="button secondary generated-image-download" id="generatedImageDownload" href="#" download><i data-lucide="download"></i>下载图片</a>
++                </div>
+             </div>
+         </div>
+     </section>
+@@ -121,6 +130,7 @@
+             <label class="text-field" for="aiApiKey"><span>API Key</span><div class="secret-field"><input id="aiApiKey" type="password" placeholder="留空保留已保存的密钥" autocomplete="new-password"><button class="icon-button subtle" id="toggleAIKeyButton" type="button" title="显示或隐藏 API Key" aria-label="显示或隐藏 API Key"><i data-lucide="eye"></i></button></div></label>
+             <label class="check-field"><input id="clearAIKey" type="checkbox">清除已保存的 API Key</label>
+             <label class="text-field" for="aiModel"><span>默认模型</span><input id="aiModel" type="text" placeholder="例如 gpt-4o-mini" autocomplete="off" required></label>
++            <label class="text-field" for="aiImageModel"><span>图片模型</span><input id="aiImageModel" type="text" placeholder="例如 gpt-image-2" autocomplete="off"></label>
+         </div>
+         <div class="dialog-actions"><button class="button secondary" id="testAIButton" type="button"><i data-lucide="activity"></i>测试连接</button><button class="button primary" id="saveAIButton" type="submit"><i data-lucide="save"></i>保存配置</button></div>
+     </form>
+diff --git a/.install/image-gen-baseline/static/web/styles.css b/static/web/styles.css
+index f5872b8..a4b4ff7 100644
+--- a/.install/image-gen-baseline/static/web/styles.css
++++ b/static/web/styles.css
+@@ -85,12 +85,24 @@ textarea:focus, input:focus { border-color: var(--info); box-shadow: 0 0 0 3px r
+ .ai-input-pane { display: grid; gap: 14px; padding-right: 22px; border-right: 1px solid var(--line); }
+ .ai-output-pane { padding-left: 22px; }
+ .ai-section .segmented-control { max-width: 340px; }
++.ai-image-options { display: grid; grid-template-columns: repeat(2, minmax(0, 170px)); gap: 10px; }
++.ai-image-options[hidden], .ai-image-result[hidden] { display: none; }
++.select-field { display: grid; gap: 7px; color: #3b3e43; font-size: 13px; font-weight: 600; }
++.select-field select { width: 100%; height: 38px; padding: 0 30px 0 10px; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); outline: none; }
++.select-field select:focus { border-color: var(--info); box-shadow: 0 0 0 3px rgba(23, 105, 170, .12); }
+ .compact-textarea { min-height: 72px; }
+ .ai-generate-button { width: fit-content; }
+ .output-heading { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; color: #3b3e43; font-size: 13px; font-weight: 600; }
+ .output-heading > div { display: flex; gap: 2px; }
+ .output-heading .icon-button { width: 34px; min-height: 34px; }
+ .ai-output-pane textarea { min-height: 298px; resize: vertical; }
++.ai-image-result { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
++.generated-image-heading { min-height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; color: #3b3e43; font-size: 13px; font-weight: 600; }
++.generated-image-heading span:last-child { min-width: 0; color: var(--muted); font-size: 11px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.generated-image-preview { width: min(100%, 340px); aspect-ratio: 1; display: block; padding: 0; overflow: hidden; background: #eef0f2; border: 1px solid var(--line); border-radius: 4px; }
++.generated-image-preview:hover { border-color: var(--info); box-shadow: 0 0 0 2px rgba(23, 105, 170, .12); }
++.generated-image-preview img { width: 100%; height: 100%; display: block; object-fit: contain; }
++.generated-image-download { width: fit-content; margin-top: 10px; text-decoration: none; }
+ 
+ .task-list { border-top: 1px solid var(--line); }
+ .task-row { display: grid; grid-template-columns: minmax(210px, 1.5fr) minmax(170px, 1fr) 110px 40px; gap: 20px; align-items: center; min-height: 76px; border-bottom: 1px solid var(--line); }
+@@ -208,7 +220,9 @@ dialog::backdrop { background: rgba(22, 24, 27, .45); }
+     .ai-input-pane { padding: 14px 0 18px; border-right: 0; border-bottom: 1px solid var(--line); }
+     .ai-output-pane { padding: 14px 0 18px; }
+     .ai-section .segmented-control { max-width: none; }
++    .ai-image-options { grid-template-columns: 1fr 1fr; }
+     .ai-generate-button { width: 100%; }
++    .generated-image-preview { width: 100%; max-width: 340px; }
+     .library-heading { flex-direction: column; }
+     .library-actions { width: 100%; flex-wrap: wrap; }
+     .search-field { width: 100%; }
+diff --git a/.install/image-gen-baseline/tests/test_web_app.py b/tests/test_web_app.py
+index 3c9f730..8f63f30 100644
+--- a/.install/image-gen-baseline/tests/test_web_app.py
++++ b/tests/test_web_app.py
+@@ -1,8 +1,10 @@
++import base64
+ import json
+ import tempfile
+ import time
+ import unittest
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from io import BytesIO
+ from pathlib import Path
+ from threading import Thread
+ from zipfile import ZipFile
+@@ -224,8 +226,15 @@ class WebAppTests(unittest.TestCase):
+         self.assertTrue((self.download_root / task["outputs"][0]).is_file())
+ 
+     def test_ai_gateway_config_is_private_and_connection_is_tested(self):
++        generated_buffer = BytesIO()
++        Image.new("RGB", (6, 4), "#e32640").save(generated_buffer, format="PNG")
++        generated_png = generated_buffer.getvalue()
++
+         class ModelsHandler(BaseHTTPRequestHandler):
+             last_payload = None
++            last_image_payload = None
++            last_image_body = b""
++            last_image_content_type = ""
+ 
+             def do_GET(self):
+                 if (
+@@ -235,7 +244,9 @@ class WebAppTests(unittest.TestCase):
+                     self.send_response(401)
+                     self.end_headers()
+                     return
+-                body = json.dumps({"data": [{"id": "demo-model"}]}).encode()
++                body = json.dumps(
++                    {"data": [{"id": "demo-model"}, {"id": "demo-image"}]}
++                ).encode()
+                 self.send_response(200)
+                 self.send_header("Content-Type", "application/json")
+                 self.send_header("Content-Length", str(len(body)))
+@@ -243,17 +254,15 @@ class WebAppTests(unittest.TestCase):
+                 self.wfile.write(body)
+ 
+             def do_POST(self):
+-                if (
+-                    self.path != "/v1/responses"
+-                    or self.headers.get("Authorization") != "Bearer relay-secret"
+-                ):
++                if self.headers.get("Authorization") != "Bearer relay-secret":
+                     self.send_response(401)
+                     self.end_headers()
+                     return
+                 size = int(self.headers.get("Content-Length", "0"))
+-                self.__class__.last_payload = json.loads(self.rfile.read(size))
+-                body = json.dumps(
+-                    {
++                request_body = self.rfile.read(size)
++                if self.path == "/v1/responses":
++                    self.__class__.last_payload = json.loads(request_body)
++                    payload = {
+                         "output": [
+                             {
+                                 "content": [
+@@ -264,9 +273,35 @@ class WebAppTests(unittest.TestCase):
+                                 ]
+                             }
+                         ]
+-                    },
+-                    ensure_ascii=False,
+-                ).encode()
++                    }
++                elif self.path == "/v1/images/edits":
++                    self.__class__.last_image_body = request_body
++                    self.__class__.last_image_content_type = self.headers.get(
++                        "Content-Type", ""
++                    )
++                    payload = {
++                        "data": [
++                            {
++                                "b64_json": base64.b64encode(generated_png).decode(),
++                                "revised_prompt": "edited prompt",
++                            }
++                        ]
++                    }
++                elif self.path == "/v1/images/generations":
++                    self.__class__.last_image_payload = json.loads(request_body)
++                    payload = {
++                        "data": [
++                            {
++                                "b64_json": base64.b64encode(generated_png).decode(),
++                                "revised_prompt": "generated prompt",
++                            }
++                        ]
++                    }
++                else:
++                    self.send_response(404)
++                    self.end_headers()
++                    return
++                body = json.dumps(payload, ensure_ascii=False).encode()
+                 self.send_response(200)
+                 self.send_header("Content-Type", "application/json")
+                 self.send_header("Content-Length", str(len(body)))
+@@ -286,6 +321,7 @@ class WebAppTests(unittest.TestCase):
+                     "base_url": f"http://127.0.0.1:{server.server_port}/v1/",
+                     "api_key": "relay-secret",
+                     "model": "demo-model",
++                    "image_model": "demo-image",
+                     "protocol": "responses",
+                 },
+             )
+@@ -297,14 +333,21 @@ class WebAppTests(unittest.TestCase):
+             self.assertTrue(
+                 saved.json()["config"]["request_url"].endswith("/v1/responses")
+             )
++            self.assertTrue(saved.json()["config"]["image_configured"])
++            self.assertTrue(
++                saved.json()["config"]["image_request_url"].endswith(
++                    "/v1/images/generations"
++                )
++            )
+ 
+             public = self.client.get("/api/ai/config")
+             self.assertNotIn("relay-secret", public.text)
+             self.assertTrue(public.json()["api_key_configured"])
+             tested = self.client.post("/api/ai/test")
+             self.assertEqual(tested.status_code, 200)
+-            self.assertEqual(tested.json()["models_count"], 1)
++            self.assertEqual(tested.json()["models_count"], 2)
+             self.assertTrue(tested.json()["model_available"])
++            self.assertTrue(tested.json()["image_model_available"])
+ 
+             image = self.download_root / "note" / "reference.png"
+             image.parent.mkdir()
+@@ -330,6 +373,56 @@ class WebAppTests(unittest.TestCase):
+             self.assertTrue(
+                 content[1]["image_url"].startswith("data:image/png;base64,")
+             )
++            self.assertEqual(generated.json()["generated_images"], [])
++
++            created = self.client.post(
++                "/api/ai/generate",
++                json={
++                    "mode": "create",
++                    "source_text": "生成一张红色主题配图",
++                    "instructions": "简洁，无文字",
++                    "image_paths": ["note/reference.png"],
++                    "generate_image": True,
++                    "image_size": "1024x1536",
++                    "image_quality": "low",
++                },
++            )
++            self.assertEqual(created.status_code, 200)
++            created_payload = created.json()
++            self.assertEqual(created_payload["image_model"], "demo-image")
++            self.assertEqual(created_payload["image_references_used"], 1)
++            generated_item = created_payload["generated_images"][0]
++            generated_path = self.download_root / generated_item["path"]
++            self.assertTrue(generated_path.is_file())
++            self.assertEqual(generated_path.read_bytes(), generated_png)
++            self.assertIn("multipart/form-data", ModelsHandler.last_image_content_type)
++            self.assertIn(b'name="image[]"', ModelsHandler.last_image_body)
++            self.assertIn(b'name="quality"\r\n\r\nlow', ModelsHandler.last_image_body)
++            image_preview = self.client.get(generated_item["preview_url"])
++            self.assertEqual(image_preview.status_code, 200)
++            self.assertEqual(image_preview.content, generated_png)
++
++            generated_without_reference = self.client.post(
++                "/api/ai/generate",
++                json={
++                    "mode": "create",
++                    "source_text": "生成方形配图",
++                    "generate_image": True,
++                },
++            )
++            self.assertEqual(generated_without_reference.status_code, 200)
++            self.assertEqual(ModelsHandler.last_image_payload["model"], "demo-image")
++            self.assertEqual(ModelsHandler.last_image_payload["size"], "1024x1024")
++
++            wrong_mode = self.client.post(
++                "/api/ai/generate",
++                json={
++                    "mode": "rewrite",
++                    "source_text": "原始正文",
++                    "generate_image": True,
++                },
++            )
++            self.assertEqual(wrong_mode.status_code, 422)
+ 
+             unsupported = self.download_root / "note" / "caption.md"
+             unsupported.write_text("caption", encoding="utf-8")
+@@ -345,6 +438,7 @@ class WebAppTests(unittest.TestCase):
+                     "base_url": f"http://127.0.0.1:{server.server_port}/v1",
+                     "api_key": "",
+                     "model": "demo-model",
++                    "image_model": "demo-image",
+                 },
+             )
+             self.assertTrue(preserved.json()["config"]["api_key_configured"])

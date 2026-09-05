@@ -1,0 +1,103 @@
+XHS-Downloader real image generation verification
+Date: 2026-09-05 Asia/Shanghai
+Branch: master
+Commit baseline: 3a8849c7afb215085b32da84bcdbeb7c6d26880e
+Changed fields: image_model=gpt-image-2; image_generation=images/generations_or_images/edits; generated_image_ui=preview_zoom_download; generated_image_storage=Volume/Download/AI生成
+
+FOUR ARTIFACT PATHS
+MODIFIED_FILE=C:\WorkSpace\xiaohongshu\XHS-Downloader\ai_gateway.py
+DIFF_FILE=C:\WorkSpace\xiaohongshu\XHS-Downloader\IMAGE_GENERATION.diff
+VERIFICATION_FILE=C:\WorkSpace\xiaohongshu\XHS-Downloader\IMAGE_GENERATION_VERIFICATION.txt
+ROLLBACK_FILE=C:\WorkSpace\xiaohongshu\XHS-Downloader\IMAGE_GENERATION_ROLLBACK.sh
+
+PRESERVED ORIGINAL HASHES
+64C876D50C8953A91DE85BBE7FDFC3B8E38ABA00662CE873A2783B691A0B9808  ai_gateway.py
+0896E4C2840E6D2F3389E3DAF181F8D43F2148B8F4F5556AC0F23FF889935FD4  web_app.py
+A25425E3CEE0F41E6F56F49DF3E07FAD3638C75DA4DAD8537BDD8AD2D6E19FC6  static/web/app.js
+61330335C3631EE66D49C4F82EFEAD31A5A135256C09D32C6CCA12CF0F38EB29  static/web/index.html
+EB31330BA4ABDEFA6F94F3485B3DC3670BC65B5BB4F28965B4942A22F560C50E  static/web/styles.css
+941E8E50909C887BAC71E54BE0B1AE3DB596294EF317051A9F5E3B236658140D  tests/test_web_app.py
+Baseline directory: C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\image-gen-baseline
+
+BASELINE
+Command: .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Input: preserved text-only AI workspace and seven tests
+Literal result:
+  Ran 7 tests in 1.279s
+  OK
+Exit status: 0
+Baseline behavior/status: selected images were sent only as Responses vision input and /api/ai/generate returned text; no Images API call, generated image file, or image output UI existed.
+
+RELAY CAPABILITY PROBE
+Command: GET configured relay /v1/models with the private saved API key and print model IDs only
+Input: http://127.0.0.1:8088/v1/models
+Literal output: ["codex-auto-review", "gpt-5.2", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-image-1", "gpt-image-1.5", "gpt-image-2"]
+Exit status: 0
+
+Command: POST /v1/images/generations with model=gpt-image-2, size=1024x1024, quality=low; decode data[0].b64_json
+Input: prompt="A minimal flat red book icon on a clean white background, centered, no text"
+Literal output: {"model":"gpt-image-2","bytes":780319,"sha256":"0d48a799763d64c93d3cd771c4b2bac9ab76cf5def999c10dba398d14d26f552","data_keys":["b64_json","revised_prompt"]}
+Exit status: 0
+
+MODIFIED
+Command: uvx ruff format --check ai_gateway.py web_app.py tests\test_web_app.py; uvx ruff check ai_gateway.py web_app.py tests\test_web_app.py; node --check static\web\app.js; .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Input: modified image generation gateway, API, page assets, and mock Responses/Images relay tests
+Literal result:
+  3 files already formatted
+  All checks passed!
+  NODE_CHECK=OK
+  test_ai_gateway_config_is_private_and_connection_is_tested ... ok
+  test_enhancement_api_and_path_validation ... ok
+  test_file_path_cannot_escape_download_root ... ok
+  test_health_page_and_runtime_lifecycle ... ok
+  test_image_enhancement_creates_2x_copy ... ok
+  test_library_file_download_and_archive ... ok
+  test_task_clipboard_cookie_and_clear_endpoints ... ok
+  Ran 7 tests in 2.599s
+  OK
+Exit status: 0
+
+CONFIGURATION
+Command: PUT /api/ai/config preserving base_url, API key, text model, and protocol; set image_model=gpt-image-2; POST /api/ai/test
+Input: saved private relay configuration; api_key input was empty to preserve the existing key
+Literal output: {"configured":true,"image_configured":true,"model":"gpt-5.6-sol","image_model":"gpt-image-2","api_key_configured":true,"models_count":13,"model_available":true,"image_model_available":true}
+Exit status: 0
+
+REAL PAGE IMAGE GENERATION
+Command: Playwright select 图文创作, select one downloaded JPEG, fill prompt, choose 1024x1024/low, click #generateAIButton, inspect result, click generated thumbnail
+Input: one reference image; prompt="以参考图中的可爱像素拼豆人物为主体，创作一张明亮干净的小红书方形配图。"; instructions="保留手工拼豆质感，柔和自然光，整齐陈列，画面中不要文字和水印。"
+Literal result: {"state":"图文生成完成 · gpt-5.6-sol · 1 张参考图","textLength":190,"imageResultHidden":false,"imageComplete":true,"naturalWidth":1254,"naturalHeight":1254,"previewUrl":"/media/AI%E7%94%9F%E6%88%90/AI_20260905_150154_9293d2.png","path":"AI生成/AI_20260905_150154_9293d2.png","downloadUrl":"/files/AI%E7%94%9F%E6%88%90/AI_20260905_150154_9293d2.png","meta":"gpt-image-2 · 1.80 MB","visual":"视觉参考 1 张","bodyOverflow":0}
+Viewer result: {"open":true,"title":"AI_20260905_150154_9293d2.png","imageComplete":true,"naturalWidth":1254,"naturalHeight":1254,"download":"/files/AI%E7%94%9F%E6%88%90/AI_20260905_150154_9293d2.png"}
+Network result: POST /api/ai/generate => 200 OK; GET generated /media path => 200 OK
+Console errors: 0
+Exit status: 0
+
+MOBILE
+Command: Playwright resize to 390x844 and inspect #aiImageOptions and #aiImageResult
+Input: completed real generation state
+Literal result: bodyScrollWidth=375; bodyClientWidth=375; image options width=347; generated result width=347; generated preview=340x340
+Screenshot: C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\screenshots\image-generation-desktop.png
+Screenshot: C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\screenshots\image-generation-mobile.png
+Exit status: 0
+
+ROLLBACK
+Command: "C:\Program Files\Git\bin\bash.exe" IMAGE_GENERATION_ROLLBACK.sh .install/image-gen-rollback-test; git diff --no-index --quiet -- .install/image-gen-baseline .install/image-gen-rollback-test
+Input: isolated copy of .install/image-gen-modified
+Literal output:
+  Restored branch fields: image_model=unused; image_generation=absent; generated_image_ui=absent
+  Restored pre-image-generation files at: /c/WorkSpace/xiaohongshu/XHS-Downloader/.install/image-gen-rollback-test
+  ROLLBACK_EXIT=0
+  HASH_COMPARE_EXIT=0
+Exit status: 0
+
+Command: PYTHONPATH=.install/image-gen-rollback-test;. .\.venv\Scripts\python.exe -m unittest discover -s .install\image-gen-rollback-test\tests -v
+Input: byte-identical isolated rollback files, shared dependencies, and seven baseline tests
+Literal output:
+  Ran 7 tests in 1.697s
+  OK
+Exit status: 0
+Restored behavior/status: the isolated copy is byte-identical to the preserved text-only baseline. The existing relay key/config and generated user media are retained, while Images API calls and generated-image UI are absent.
+
+FINAL STATUS
+MODIFIED_FILE remains changed. The service is running at http://127.0.0.1:5557. The saved API key remains private. The verified generated image remains at C:\WorkSpace\xiaohongshu\XHS-Downloader\Volume\Download\AI生成\AI_20260905_150154_9293d2.png (1889955 bytes).
+Official reference: https://developers.openai.com/api/docs/guides/image-generation
