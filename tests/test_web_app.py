@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -14,8 +15,11 @@ from PIL import Image
 
 from ai_gateway import AIConfigStore, AIGateway
 from auth import AuthStore, LoginThrottle
+from billing import BillingStore
+from knowledge_base import KnowledgeBase
 from media_enhancer import enhance_media
-from web_app import create_app
+from web_app import _require_non_c_storage, create_app
+from viral_notes import ViralService, ViralStore
 
 
 class FakeRuntime:
@@ -73,6 +77,9 @@ class FakeRuntime:
     def download_root(self):
         return self.root
 
+    def discovery_settings(self):
+        return {}
+
 
 class WebAppTests(unittest.TestCase):
     def setUp(self):
@@ -85,12 +92,58 @@ class WebAppTests(unittest.TestCase):
             timeout=2,
         )
         self.auth_store = AuthStore(Path(self.temporary.name) / "users.db")
+        self.knowledge_base = KnowledgeBase(
+            Path(self.temporary.name) / "knowledge.db"
+        )
+        self.billing_store = BillingStore(Path(self.temporary.name) / "billing.db")
+        self.corpus_root = Path(self.temporary.name) / "feishu_export"
+        (self.corpus_root / "images").mkdir(parents=True)
+        Image.new("RGB", (5, 4), "#d9273e").save(
+            self.corpus_root / "images" / "cup.png"
+        )
+        self.corpus_path = self.corpus_root / "entries.json"
+        self.corpus_path.write_text(
+            json.dumps(
+                {
+                    "title": "测试爆款素材库",
+                    "entries": [
+                        {
+                            "type": "product",
+                            "number": 1,
+                            "record_id": "ceramic-cup",
+                            "title": "陶瓷马克杯案例",
+                            "name": "陶瓷马克杯",
+                            "add_to_cart_24h": 680,
+                            "paragraphs": [
+                                "帐号亮点：【低粉爆款】【素材好拍】",
+                                "居家办公场景，从桌面凌乱的痛点切入。",
+                            ],
+                            "highlights": ["【低粉爆款】【素材好拍】"],
+                            "source": "https://example.com/source",
+                            "product_urls": ["https://example.com/product"],
+                            "followers_as_written": "326",
+                            "sales_as_written": "1200",
+                            "images": [{"local_path": "images/cup.png"}],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
         self.client_context = TestClient(
             create_app(
                 runtime=self.runtime,
                 ai_gateway=self.ai_gateway,
                 auth_store=self.auth_store,
                 login_throttle=LoginThrottle(max_attempts=2, window_seconds=60),
+                knowledge_base=self.knowledge_base,
+                billing_store=self.billing_store,
+                corpus_path=self.corpus_path,
+                viral_service=ViralService(
+                    ViralStore(Path(self.temporary.name) / "viral.db"),
+                    self.runtime.discovery_settings,
+                ),
             )
         )
         self.client = self.client_context.__enter__()
@@ -118,6 +171,33 @@ class WebAppTests(unittest.TestCase):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
         self.assertIn("小红书素材下载", page.text)
+
+    def test_billing_usage_plans_and_admin_credit_grant(self):
+        plans = self.client.get("/api/billing/plans")
+        self.assertEqual(plans.status_code, 200)
+        self.assertEqual(plans.json()["costs"], {"text": 1, "image": 5})
+        usage = self.client.get("/api/billing/usage")
+        self.assertEqual(usage.status_code, 200)
+        self.assertEqual(usage.json()["free_remaining"], 20)
+        order = self.client.post("/api/billing/orders", json={"plan_id": "starter"})
+        self.assertEqual(order.status_code, 201)
+        self.assertEqual(order.json()["status"], "pending")
+        granted = self.client.post(
+            "/api/admin/billing/grant",
+            json={"user_id": self.admin_session["user"]["id"], "units": 20},
+        )
+        self.assertEqual(granted.status_code, 200)
+        self.assertEqual(granted.json()["usage"]["paid_credits"], 20)
+
+    @unittest.skipUnless(os.name == "nt", "Windows drive policy")
+    def test_default_storage_policy_rejects_c_drive(self):
+        with self.assertRaisesRegex(RuntimeError, "不能位于 C 盘"):
+            _require_non_c_storage(Path("C:/xhs-local-data"), "本地数据目录")
+        allowed = _require_non_c_storage(
+            Path("D:/Workspace/XHS-Downloader/Volume"),
+            "本地数据目录",
+        )
+        self.assertEqual(allowed.drive.casefold(), "d:")
 
     def test_registration_login_session_and_security_headers(self):
         self.assertEqual(self.admin_session["user"]["role"], "admin")
@@ -253,6 +333,144 @@ class WebAppTests(unittest.TestCase):
             },
         )
         self.assertEqual(rejected.status_code, 409)
+
+    def test_admin_can_manage_local_knowledge_base(self):
+        initial = self.client.get("/api/knowledge")
+        self.assertEqual(initial.status_code, 200)
+        self.assertEqual(initial.json()["stats"]["entries"], 5)
+
+        created = self.client.post(
+            "/api/knowledge",
+            json={
+                "kind": "note",
+                "title": "家居笔记语气",
+                "content": "用具体使用场景替代空泛形容词。",
+                "tags": ["家居", "场景"],
+                "priority": 72,
+                "active": True,
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        entry = created.json()["entry"]
+        self.assertEqual(entry["origin"], "manual")
+
+        updated = self.client.put(
+            f"/api/knowledge/{entry['id']}",
+            json={**entry, "priority": 88, "active": False},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["entry"]["priority"], 88)
+        self.assertFalse(updated.json()["entry"]["active"])
+
+        member = TestClient(self.client.app)
+        member.post(
+            "/api/auth/register",
+            json={
+                "email": "knowledge-member@example.com",
+                "display_name": "知识库成员",
+                "password": "KnowledgeMember2026",
+            },
+        )
+        self.assertEqual(member.get("/api/knowledge").status_code, 200)
+        self.assertEqual(
+            member.post(
+                "/api/knowledge",
+                json={
+                    "kind": "note",
+                    "title": "无权写入",
+                    "content": "普通用户不能改写团队知识库。",
+                },
+            ).status_code,
+            403,
+        )
+
+        deleted = self.client.delete(f"/api/knowledge/{entry['id']}")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(
+            self.client.put(
+                f"/api/knowledge/{entry['id']}",
+                json={
+                    "kind": "note",
+                    "title": "已删除",
+                    "content": "已删除条目不能更新。",
+                },
+            ).status_code,
+            404,
+        )
+
+    def test_copywriting_mode_validates_required_materials(self):
+        close_rewrite = self.client.post(
+            "/api/ai/generate",
+            json={
+                "copywriting_mode": "1",
+                "source_text": "自己的历史笔记",
+                "product_name": "同款产品",
+                "keywords": ["核心搜索词"],
+            },
+        )
+        self.assertEqual(close_rewrite.status_code, 422)
+        self.assertIn("自己账号", close_rewrite.json()["detail"])
+
+        scenario = self.client.post(
+            "/api/ai/generate",
+            json={
+                "copywriting_mode": "5",
+                "source_text": "需要改写的原文",
+                "product_name": "通勤包",
+                "target_audience": "上班族",
+            },
+        )
+        self.assertEqual(scenario.status_code, 422)
+        self.assertIn("产品用途", scenario.json()["detail"])
+
+    def test_ai_history_and_corpus_endpoints(self):
+        generated = self.download_root / "AI生成" / "history.png"
+        generated.parent.mkdir(parents=True)
+        generated.write_bytes((self.corpus_root / "images" / "cup.png").read_bytes())
+        run_id = self.knowledge_base.record_run(
+            self.admin_session["user"]["id"],
+            "rewrite:mengge-2",
+            True,
+            "参考正文",
+            "保持真实",
+            "生成的完整正文",
+            ["AI生成/history.png"],
+            ["seed-note-structure"],
+            "demo-model",
+            {"copywriting_mode": "2", "product_name": "陶瓷马克杯"},
+            ["feishu-ceramic-cup"],
+        )
+
+        history = self.client.get("/api/ai/history?query=马克杯")
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(history.json()["total"], 1)
+        self.assertEqual(history.json()["items"][0]["id"], run_id)
+        detail = self.client.get(f"/api/ai/history/{run_id}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["output_text"], "生成的完整正文")
+        self.assertEqual(detail.json()["request_payload"]["copywriting_mode"], "2")
+        image = detail.json()["generated_images"][0]
+        self.assertEqual(self.client.get(image["preview_url"]).status_code, 200)
+
+        corpus = self.client.get("/api/ai/corpus?query=马克杯")
+        self.assertEqual(corpus.status_code, 200)
+        self.assertEqual(corpus.json()["total"], 1)
+        corpus_id = corpus.json()["items"][0]["id"]
+        corpus_detail = self.client.get(f"/api/ai/corpus/{corpus_id}")
+        self.assertEqual(corpus_detail.status_code, 200)
+        self.assertIn("居家办公", corpus_detail.json()["content"])
+        corpus_image = self.client.get(f"/api/ai/corpus/{corpus_id}/images/0")
+        self.assertEqual(corpus_image.status_code, 200)
+        self.assertTrue(corpus_image.headers["content-type"].startswith("image/png"))
+        self.assertEqual(
+            self.client.get(f"/api/ai/corpus/{corpus_id}/images/4").status_code,
+            404,
+        )
+
+        deleted = self.client.delete(f"/api/ai/history/{run_id}")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertTrue(deleted.json()["ok"])
+        self.assertEqual(self.client.get(f"/api/ai/history/{run_id}").status_code, 404)
 
     def test_task_clipboard_cookie_and_clear_endpoints(self):
         invalid = self.client.post("/api/tasks", json={"content": "not a link"})
@@ -522,11 +740,72 @@ class WebAppTests(unittest.TestCase):
             content = payload["input"][0]["content"]
             self.assertEqual(content[0]["type"], "input_text")
             self.assertIn("原始正文", content[0]["text"])
+            self.assertIn("本地知识库参考", content[0]["text"])
             self.assertEqual(content[1]["type"], "input_image")
             self.assertTrue(
                 content[1]["image_url"].startswith("data:image/png;base64,")
             )
             self.assertEqual(generated.json()["generated_images"], [])
+            self.assertTrue(generated.json()["run_id"])
+            self.assertGreater(len(generated.json()["knowledge_used"]), 0)
+            feedback = self.client.post(
+                f"/api/knowledge/runs/{generated.json()['run_id']}/feedback",
+                json={
+                    "rating": 5,
+                    "feedback": "结构清楚",
+                    "reusable_lesson": "正文第一段先给出可验证的核心结论。",
+                },
+            )
+            self.assertEqual(feedback.status_code, 200)
+            self.assertTrue(feedback.json()["knowledge_entry"]["active"])
+            self.assertEqual(feedback.json()["knowledge_entry"]["kind"], "note")
+
+            mastered = self.client.post(
+                "/api/ai/generate",
+                json={
+                    "mode": "rewrite",
+                    "copywriting_mode": "4",
+                    "source_text": "同行参考正文",
+                    "product_name": "陶瓷马克杯",
+                    "target_audience": "居家办公人群",
+                    "selling_points": "350ml 白色陶瓷杯",
+                    "pain_points": "桌面杯子容易显乱",
+                    "cover_description": "自然光桌面俯拍",
+                    "locked_title": "桌面清爽一点，工作也更顺手",
+                },
+            )
+            self.assertEqual(mastered.status_code, 200)
+            self.assertEqual(mastered.json()["copywriting_mode"], "4")
+            self.assertEqual(
+                mastered.json()["copywriting_mode_label"], "定题真人种草"
+            )
+            master_prompt = ModelsHandler.last_payload["input"][0]["content"][0][
+                "text"
+            ]
+            self.assertIn("模式 4", master_prompt)
+            self.assertIn("10 个", master_prompt)
+            self.assertIn("陶瓷马克杯", master_prompt)
+            self.assertIn("本地知识库参考", master_prompt)
+            self.assertIn("爆款素材库参考", master_prompt)
+            self.assertEqual(mastered.json()["corpus_used"][0]["product_name"], "陶瓷马克杯")
+            self.assertEqual(ModelsHandler.last_payload["max_output_tokens"], 4000)
+
+            own_post = self.client.post(
+                "/api/ai/generate",
+                json={
+                    "mode": "rewrite",
+                    "copywriting_mode": "1",
+                    "source_text": "自己账号已经验证过的马克杯爆款正文",
+                    "product_name": "陶瓷马克杯",
+                    "selling_points": "350ml 白色陶瓷杯",
+                    "keywords": ["陶瓷杯"],
+                    "own_post_confirmed": True,
+                },
+            )
+            self.assertEqual(own_post.status_code, 200)
+            own_prompt = ModelsHandler.last_payload["input"][0]["content"][0]["text"]
+            self.assertNotIn("爆款素材库参考", own_prompt)
+            self.assertEqual(own_post.json()["corpus_used"], [])
 
             created = self.client.post(
                 "/api/ai/generate",
@@ -551,9 +830,37 @@ class WebAppTests(unittest.TestCase):
             self.assertIn("multipart/form-data", ModelsHandler.last_image_content_type)
             self.assertIn(b'name="image[]"', ModelsHandler.last_image_body)
             self.assertIn(b'name="quality"\r\n\r\nlow', ModelsHandler.last_image_body)
+            self.assertIn(
+                "本地知识库参考".encode(), ModelsHandler.last_image_body
+            )
             image_preview = self.client.get(generated_item["preview_url"])
             self.assertEqual(image_preview.status_code, 200)
             self.assertEqual(image_preview.content, generated_png)
+
+            edited = self.client.post(
+                "/api/ai/images/edit",
+                json={
+                    "image_paths": ["note/reference.png"],
+                    "prompt": "保留杯子主体，替换为明亮书桌背景",
+                    "instructions": "不要添加文字",
+                    "image_size": "1024x1536",
+                    "image_quality": "medium",
+                },
+            )
+            self.assertEqual(edited.status_code, 200)
+            edited_payload = edited.json()
+            self.assertEqual(edited_payload["image_model"], "demo-image")
+            self.assertEqual(edited_payload["references_used"], 1)
+            self.assertTrue(edited_payload["run_id"])
+            edited_item = edited_payload["generated_image"]
+            self.assertTrue(edited_item["path"].startswith("AI生成/AI_EDIT_"))
+            self.assertTrue((self.download_root / edited_item["path"]).is_file())
+            self.assertIn(b'name="image[]"', ModelsHandler.last_image_body)
+            self.assertIn("保留杯子主体".encode(), ModelsHandler.last_image_body)
+            self.assertIn(
+                b'name="quality"\r\n\r\nmedium',
+                ModelsHandler.last_image_body,
+            )
 
             generated_without_reference = self.client.post(
                 "/api/ai/generate",
@@ -584,6 +891,11 @@ class WebAppTests(unittest.TestCase):
                 json={"image_paths": ["note/caption.md"]},
             )
             self.assertEqual(rejected.status_code, 422)
+            empty_edit = self.client.post(
+                "/api/ai/images/edit",
+                json={"image_paths": [], "prompt": "修改背景"},
+            )
+            self.assertEqual(empty_edit.status_code, 422)
 
             preserved = self.client.put(
                 "/api/ai/config",

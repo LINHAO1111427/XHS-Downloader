@@ -141,13 +141,14 @@ def enhance_media(source: Path) -> Path:
 
 
 class EnhancementManager:
-    def __init__(self, max_workers: int = 1) -> None:
+    def __init__(self, max_workers: int = 1, *, delete_image_sources: bool = True) -> None:
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="media-enhancer",
         )
         self._lock = Lock()
         self._tasks: dict[str, dict] = {}
+        self.delete_image_sources = delete_image_sources
 
     def submit(self, root: Path, sources: list[Path]) -> dict:
         task_id = uuid4().hex
@@ -163,6 +164,7 @@ class EnhancementManager:
             "paths": [path.relative_to(root).as_posix() for path in sources],
             "outputs": [],
             "errors": [],
+            "deleted_sources": [],
         }
         with self._lock:
             self._tasks[task_id] = task
@@ -194,6 +196,11 @@ class EnhancementManager:
                     self._tasks[task_id]["outputs"].append(
                         output.relative_to(root).as_posix()
                     )
+                # Local cleanup is intentional for enlarged image copies; retain video originals.
+                if self.delete_image_sources and source.suffix.lower() in IMAGE_SUFFIXES:
+                    source.unlink(missing_ok=True)
+                    with self._lock:
+                        self._tasks[task_id]["deleted_sources"].append(relative)
             except Exception as error:
                 with self._lock:
                     self._tasks[task_id]["errors"].append(

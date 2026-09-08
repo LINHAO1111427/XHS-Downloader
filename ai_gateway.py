@@ -23,7 +23,7 @@ class AIGatewayConnectionError(RuntimeError):
 
 API_PROTOCOLS = frozenset({"chat_completions", "responses"})
 SYSTEM_PROMPT = (
-    "你是专业的小红书内容编辑。请使用自然、具体的中文，保留输入中的事实，"
+    "你正在执行孟哥小红书AI文案爆单大师的结构化写作流程。请使用自然、具体的中文，保留输入中的事实，"
     "不要编造未提供的体验、数据或承诺。输出可以直接编辑使用的正文，不要解释创作过程。"
 )
 
@@ -242,12 +242,20 @@ class AIGateway:
         instructions: str,
         mode: str,
         images: list[tuple[str, bytes]],
+        knowledge_context: str = "",
+        workflow_context: str = "",
     ) -> dict:
         config = self.store.connection_config()
         if not config["model"]:
             raise AIConfigError("请先配置默认模型")
 
-        user_text = self._user_prompt(source_text, instructions, mode)
+        user_text = self._user_prompt(
+            source_text,
+            instructions,
+            mode,
+            knowledge_context,
+            workflow_context,
+        )
         data_urls = [
             f"data:{mime_type};base64,{base64.b64encode(data).decode('ascii')}"
             for mime_type, data in images
@@ -281,11 +289,17 @@ class AIGateway:
         images: list[tuple[str, bytes]],
         size: str,
         quality: str,
+        knowledge_context: str = "",
     ) -> dict:
         config = self.store.connection_config()
         if not config["image_model"]:
             raise AIConfigError("请先配置图片模型")
-        prompt = self._image_prompt(source_text, instructions, bool(images))
+        prompt = self._image_prompt(
+            source_text,
+            instructions,
+            bool(images),
+            knowledge_context,
+        )
         fields = {
             "model": config["image_model"],
             "prompt": prompt,
@@ -405,12 +419,19 @@ class AIGateway:
         return parsed
 
     @staticmethod
-    def _image_prompt(source_text: str, instructions: str, has_references: bool) -> str:
+    def _image_prompt(
+        source_text: str,
+        instructions: str,
+        has_references: bool,
+        knowledge_context: str = "",
+    ) -> str:
         parts = [source_text.strip() or "根据参考图片创作一张小红书配图"]
         if instructions.strip():
             parts.append(instructions.strip())
         if has_references:
             parts.append("参考随附图片中的主体、造型和视觉元素，重新构图并生成新图片。")
+        if knowledge_context.strip():
+            parts.append(knowledge_context.strip())
         parts.append("画面完整清晰，不添加水印、平台标识或无关文字。")
         return "\n\n".join(parts)
 
@@ -433,15 +454,25 @@ class AIGateway:
         return image_data, revised_prompt if isinstance(revised_prompt, str) else ""
 
     @staticmethod
-    def _user_prompt(source_text: str, instructions: str, mode: str) -> str:
+    def _user_prompt(
+        source_text: str,
+        instructions: str,
+        mode: str,
+        knowledge_context: str = "",
+        workflow_context: str = "",
+    ) -> str:
         action = (
             "在保留事实和核心信息的前提下改写" if mode == "rewrite" else "根据素材创作"
         )
         parts = [f"任务：{action}一篇小红书正文。"]
+        if workflow_context.strip():
+            parts.append(workflow_context.strip())
         if source_text.strip():
             parts.append(f"原始内容或主题：\n{source_text.strip()}")
         if instructions.strip():
             parts.append(f"补充要求：\n{instructions.strip()}")
+        if knowledge_context.strip():
+            parts.append(knowledge_context.strip())
         if not source_text.strip():
             parts.append("请根据随附图片提炼真实可见的信息。")
         return "\n\n".join(parts)
@@ -456,7 +487,7 @@ class AIGateway:
             "model": model,
             "instructions": SYSTEM_PROMPT,
             "input": [{"role": "user", "content": content}],
-            "max_output_tokens": 2000,
+            "max_output_tokens": 4000,
         }
 
     @staticmethod
@@ -472,7 +503,7 @@ class AIGateway:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": content},
             ],
-            "max_tokens": 2000,
+            "max_tokens": 4000,
         }
 
     @staticmethod

@@ -32,113 +32,187 @@
 </section>
 
 <div id="appView" hidden>
-<header class="app-header">
-    <div class="brand">
-        <img src="/assets/logo.png" alt="" width="42" height="42">
-        <div><h1>小红书素材下载</h1><p>XHS-Downloader Web</p></div>
-    </div>
-    <div class="header-actions">
-        <span class="service-status" id="serviceStatus"><i></i><span>正在连接</span></span>
-        <button class="icon-button" id="adminUsersButton" type="button" title="用户管理" aria-label="用户管理" hidden>
-            <i data-lucide="users"></i>
-        </button>
-        <button class="icon-button" id="aiSettingsButton" type="button" title="AI 中转设置" aria-label="AI 中转设置" hidden>
-            <i data-lucide="bot"></i>
-        </button>
-        <button class="icon-button" id="settingsButton" type="button" title="Cookie 设置" aria-label="Cookie 设置" hidden>
-            <i data-lucide="settings-2"></i>
-        </button>
-        <button class="icon-button" id="openFolderButton" type="button" title="打开下载目录" aria-label="打开下载目录" hidden>
-            <i data-lucide="folder-open"></i>
-        </button>
-        <button class="account-button" id="accountButton" type="button" title="账号中心" aria-label="账号中心"><span id="accountInitial">用</span></button>
-    </div>
-</header>
-
-<main>
-    <section class="input-band" aria-labelledby="inputTitle">
-        <div class="section-heading input-heading">
-            <div><h2 id="inputTitle">新建下载</h2><p id="downloadRoot">正在读取下载目录</p></div>
-            <div class="quality-status" aria-label="下载质量状态">
-                <span class="quality-badge" title="从原始 CDN 获取，规避平台后加水印；不处理画面中已经烧录的水印"><i data-lucide="shield-check"></i> 源文件去平台水印</span>
-                <span class="quality-badge resolution"><i data-lucide="badge-check"></i> 原始清晰度优先</span>
-                <span class="quality-badge live" id="livePhotoBadge"><i data-lucide="images"></i> 实况图片已开启</span>
+    <div class="app-shell">
+        <aside class="app-sidebar">
+            <div class="sidebar-brand">
+                <img src="/assets/logo.png" alt="" width="40" height="40">
+                <div><strong>小红书工作台</strong><span>XHS-Downloader</span></div>
             </div>
-        </div>
-        <label class="url-field" for="urlInput">
-            <span>笔记链接</span>
-            <textarea id="urlInput" rows="3" placeholder="粘贴小红书笔记链接或包含链接的分享文本" autocomplete="off"></textarea>
-        </label>
-        <div class="input-actions">
-            <div class="secondary-actions">
-                <button class="button secondary" id="pasteButton" type="button"><i data-lucide="clipboard-paste"></i>粘贴</button>
-                <button class="icon-button subtle" id="clearInputButton" type="button" title="清空链接" aria-label="清空链接"><i data-lucide="x"></i></button>
+            <nav class="primary-nav" aria-label="主功能">
+                <button class="nav-item active" type="button" data-route="download"><i data-lucide="download"></i><span>下载</span><b id="navTaskCount" hidden></b></button>
+                <button class="nav-item" type="button" data-route="viral"><i data-lucide="chart-no-axes-combined"></i><span>低粉爆款</span></button>
+                <button class="nav-item" type="button" data-route="collect"><i data-lucide="radar"></i><span>采集</span></button>
+                <button class="nav-item" type="button" data-route="ai"><i data-lucide="sparkles"></i><span>AI 创作</span></button>
+            </nav>
+            <div class="sidebar-status">
+                <span class="service-status" id="serviceStatus"><i></i><span>正在连接</span></span>
+                <span>本地内容工作台</span>
             </div>
-            <button class="button primary" id="downloadButton" type="button"><i data-lucide="download"></i>开始下载</button>
-        </div>
-    </section>
+        </aside>
 
-    <section class="content-section ai-section" aria-labelledby="aiStudioTitle">
-        <div class="section-heading">
-            <div><h2 id="aiStudioTitle">AI 内容工作台</h2><p id="aiGenerationState">正在读取 AI 配置</p></div>
-            <span class="visual-context" id="aiVisualCount"><i data-lucide="image"></i>视觉参考 0 张</span>
-        </div>
-        <div class="ai-workspace">
-            <div class="ai-input-pane">
-                <fieldset class="protocol-field"><legend>生成模式</legend><div class="segmented-control"><label><input type="radio" name="aiGenerationMode" value="rewrite" checked><span>内容改写</span></label><label><input type="radio" name="aiGenerationMode" value="create"><span>图文创作</span></label></div></fieldset>
-                <div class="ai-image-options" id="aiImageOptions" hidden>
-                    <label class="select-field" for="aiImageSize"><span>图片比例</span><select id="aiImageSize"><option value="1024x1024">方图 1:1</option><option value="1024x1536">竖图 2:3</option><option value="1536x1024">横图 3:2</option></select></label>
-                    <label class="select-field" for="aiImageQuality"><span>图片质量</span><select id="aiImageQuality"><option value="low">标准</option><option value="medium">精细</option><option value="high">高清</option></select></label>
+        <div class="workspace-body">
+            <header class="app-header">
+                <div class="mobile-brand"><img src="/assets/logo.png" alt="" width="34" height="34"><strong id="mobilePageTitle">下载</strong></div>
+                <div class="header-actions">
+                    <button class="icon-button" id="adminUsersButton" type="button" title="用户管理" aria-label="用户管理" hidden><i data-lucide="users"></i></button>
+                    <button class="icon-button" id="aiSettingsButton" type="button" title="AI 中转设置" aria-label="AI 中转设置" hidden><i data-lucide="bot"></i></button>
+                    <button class="icon-button" id="knowledgeButton" type="button" title="本地知识库" aria-label="本地知识库" hidden><i data-lucide="book-open"></i></button>
+                    <button class="icon-button" id="settingsButton" type="button" title="Cookie 设置" aria-label="Cookie 设置" hidden><i data-lucide="settings-2"></i></button>
+                    <button class="icon-button" id="openFolderButton" type="button" title="打开下载目录" aria-label="打开下载目录" hidden><i data-lucide="folder-open"></i></button>
+                    <button class="account-button" id="accountButton" type="button" title="账号中心" aria-label="账号中心"><span id="accountInitial">用</span></button>
                 </div>
-                <label class="url-field" for="aiSourceText"><span>原始内容或主题</span><textarea id="aiSourceText" rows="6" placeholder="输入需要改写的正文，或填写创作主题"></textarea></label>
-                <label class="url-field" for="aiInstructions"><span>补充要求</span><textarea id="aiInstructions" class="compact-textarea" rows="3" placeholder="语气、篇幅、受众或必须保留的信息"></textarea></label>
-                <button class="button primary ai-generate-button" id="generateAIButton" type="button"><i data-lucide="sparkles"></i><span id="generateAIButtonLabel">生成内容</span></button>
-            </div>
-            <div class="ai-output-pane">
-                <div class="output-heading"><span>生成结果</span><div><button class="icon-button subtle" id="clearAIOutputButton" type="button" title="清空生成结果" aria-label="清空生成结果"><i data-lucide="eraser"></i></button><button class="icon-button subtle" id="copyAIOutputButton" type="button" title="复制生成结果" aria-label="复制生成结果" disabled><i data-lucide="copy"></i></button></div></div>
-                <textarea id="aiOutput" rows="14" placeholder="AI 生成结果将在这里显示" readonly></textarea>
-                <div class="ai-image-result" id="aiImageResult" hidden>
-                    <div class="generated-image-heading"><span>生成图片</span><span id="generatedImageMeta"></span></div>
-                    <button class="generated-image-preview" id="generatedImagePreviewButton" type="button" title="放大查看生成图片"><img id="generatedImagePreview" alt="AI 生成图片"></button>
-                    <a class="button secondary generated-image-download" id="generatedImageDownload" href="#" download><i data-lucide="download"></i>下载图片</a>
-                </div>
-            </div>
-        </div>
-    </section>
+            </header>
 
-    <section class="content-section" aria-labelledby="taskTitle">
-        <div class="section-heading">
-            <div><h2 id="taskTitle">下载任务</h2><p id="taskSummary">暂无任务</p></div>
-            <button class="icon-button subtle" id="clearTasksButton" type="button" title="清理已结束任务" aria-label="清理已结束任务"><i data-lucide="list-x"></i></button>
-        </div>
-        <div class="task-list" id="taskList" aria-live="polite">
-            <div class="empty-state"><i data-lucide="inbox"></i><span>暂无下载任务</span></div>
-        </div>
-    </section>
+            <main class="app-main">
+                <section class="page-panel active" data-page="download" aria-labelledby="downloadPageTitle">
+                    <div class="page-heading">
+                        <div><span class="page-kicker">DOWNLOAD</span><h1 id="downloadPageTitle">下载</h1><p id="downloadRoot">正在读取下载目录</p></div>
+                        <div class="quality-status" aria-label="下载质量状态">
+                            <span class="quality-badge" title="从原始 CDN 获取，规避平台后加水印；不处理画面中已经烧录的水印"><i data-lucide="shield-check"></i>源文件去平台水印</span>
+                            <span class="quality-badge resolution"><i data-lucide="badge-check"></i>原始清晰度优先</span>
+                            <span class="quality-badge live" id="livePhotoBadge"><i data-lucide="images"></i>实况图片已开启</span>
+                        </div>
+                    </div>
 
-    <section class="content-section library-section" aria-labelledby="libraryTitle">
-        <div class="section-heading library-heading">
-            <div><h2 id="libraryTitle">已下载文件</h2><p id="librarySummary">正在读取</p></div>
-            <div class="library-actions">
-                <label class="search-field"><i data-lucide="search"></i><input id="fileSearch" type="search" placeholder="搜索文件"></label>
-                <button class="button enhance" id="enhanceButton" type="button" disabled title="生成 2 倍清晰增强副本"><i data-lucide="wand-sparkles"></i>清晰增强 2x</button>
-                <button class="button secondary" id="archiveButton" type="button" disabled><i data-lucide="archive"></i>打包下载</button>
-                <button class="icon-button subtle" id="refreshLibraryButton" type="button" title="刷新文件" aria-label="刷新文件"><i data-lucide="refresh-cw"></i></button>
-            </div>
+                    <section class="workspace-panel download-composer" aria-labelledby="inputTitle">
+                        <div class="section-heading"><div><h2 id="inputTitle">新建下载</h2><p>支持笔记链接与分享文本</p></div></div>
+                        <label class="url-field" for="urlInput"><span>笔记链接</span><textarea id="urlInput" rows="3" placeholder="粘贴小红书笔记链接或包含链接的分享文本" autocomplete="off"></textarea></label>
+                        <div class="input-actions">
+                            <div class="secondary-actions"><button class="button secondary" id="pasteButton" type="button"><i data-lucide="clipboard-paste"></i>粘贴</button><button class="icon-button subtle" id="clearInputButton" type="button" title="清空链接" aria-label="清空链接"><i data-lucide="x"></i></button></div>
+                            <button class="button primary" id="downloadButton" type="button"><i data-lucide="download"></i>开始下载</button>
+                        </div>
+                    </section>
+
+                    <section class="content-section" aria-labelledby="taskTitle">
+                        <div class="section-heading"><div><h2 id="taskTitle">下载任务</h2><p id="taskSummary">暂无任务</p></div><button class="icon-button subtle" id="clearTasksButton" type="button" title="清理已结束任务" aria-label="清理已结束任务"><i data-lucide="list-x"></i></button></div>
+                        <div class="task-list" id="taskList" aria-live="polite"><div class="empty-state"><i data-lucide="inbox"></i><span>暂无下载任务</span></div></div>
+                    </section>
+
+                    <section class="content-section library-section" aria-labelledby="libraryTitle">
+                        <div class="section-heading library-heading">
+                            <div><h2 id="libraryTitle">已下载文件</h2><p id="librarySummary">正在读取</p></div>
+                            <div class="library-actions"><label class="search-field"><i data-lucide="search"></i><input id="fileSearch" type="search" placeholder="搜索文件"></label><button class="button enhance" id="enhanceButton" type="button" disabled title="生成 2 倍清晰增强副本"><i data-lucide="wand-sparkles"></i>清晰增强 2x</button><button class="button secondary" id="remixButton" type="button" disabled title="将选中的视频混剪成一个新视频"><i data-lucide="scissors"></i>视频混剪</button><button class="button secondary" id="dedupeButton" type="button" title="查找重复视频"><i data-lucide="copy-check"></i>查重</button><button class="button secondary" id="archiveButton" type="button" disabled><i data-lucide="archive"></i>打包下载</button><button class="icon-button subtle" id="refreshLibraryButton" type="button" title="刷新文件" aria-label="刷新文件"><i data-lucide="refresh-cw"></i></button></div>
+                        </div>
+                        <div class="enhancement-strip" id="enhancementPanel" hidden aria-live="polite"><div class="enhancement-copy"><i data-lucide="sparkles"></i><div><strong id="enhancementTitle">清晰增强</strong><span id="enhancementDetail"></span></div></div><div class="enhancement-progress"><div class="progress-track"><div class="progress-bar" id="enhancementProgress"></div></div><span class="state-pill" id="enhancementState"></span></div></div>
+                        <div class="file-table-wrap">
+                            <table class="file-table"><thead><tr><th class="select-cell"><input id="selectAllFiles" type="checkbox" aria-label="全选文件"></th><th class="preview-cell">预览</th><th>文件名</th><th>格式</th><th>大小</th><th>修改时间</th><th class="action-cell">操作</th></tr></thead><tbody id="fileList"></tbody></table>
+                            <div class="empty-state" id="fileEmpty"><i data-lucide="folder-search"></i><span>暂无已下载文件</span></div>
+                        </div>
+                    </section>
+                </section>
+
+                <section class="page-panel" data-page="viral" aria-labelledby="viralTitle">
+                    <div class="page-heading">
+                        <div><span class="page-kicker">RANKING</span><h1 id="viralTitle">低粉爆款</h1><p>按互动效率筛选的采集结果</p></div>
+                        <div class="viral-actions"><a class="button secondary" id="viralExport" hidden><i data-lucide="file-down"></i>导出 CSV</a><button class="icon-button" id="viralRefresh" type="button" title="刷新榜单" aria-label="刷新榜单"><i data-lucide="refresh-cw"></i></button></div>
+                    </div>
+                    <section class="workspace-panel viral-ranking-panel">
+                        <div class="viral-results-toolbar"><label class="select-field viral-history"><span class="visually-hidden">采集批次</span><select id="viralHistory" aria-label="采集批次"><option value="">暂无采集记录</option></select></label><span id="viralSummary"></span></div>
+                        <p id="viralRunRules" class="viral-run-rules"></p>
+                        <div class="viral-table-wrap"><table class="viral-table" id="viralTable" hidden><thead><tr><th>笔记 / 作者</th><th>粉丝</th><th>点赞</th><th>收藏</th><th>评论</th><th>分享</th><th>互动 / 粉丝</th><th>爆款分</th><th>发布时间</th><th><span class="visually-hidden">操作</span></th></tr></thead><tbody id="viralList"></tbody></table><div class="empty-state" id="viralEmpty"><i data-lucide="chart-no-axes-combined"></i><span>暂无采集结果</span></div></div>
+                        <details class="viral-errors" id="viralErrors" hidden><summary id="viralErrorSummary">采集异常</summary><ul id="viralErrorList"></ul></details>
+                    </section>
+                </section>
+
+                <section class="page-panel" data-page="collect" aria-labelledby="collectTitle">
+                    <div class="page-heading">
+                        <div><span class="page-kicker">COLLECT</span><h1 id="collectTitle">采集</h1><p id="viralStatus" role="status">正在读取采集状态</p></div>
+                        <button class="button secondary compact-command" id="viralCancel" type="button" hidden><i data-lucide="square"></i>停止采集</button>
+                    </div>
+                    <section class="workspace-panel collect-panel">
+                        <div class="section-heading"><div><h2>采集规则</h2><p>关键词与低粉爆款筛选条件</p></div></div>
+                        <form id="viralForm" class="viral-form"><fieldset id="viralControls">
+                            <div class="viral-filter-grid"><label class="text-field viral-keywords"><span>关键词</span><input id="viralKeywords" type="text" maxlength="254" value="家居" placeholder="家居，收纳，厨房" required></label><label class="select-field"><span>发布时间</span><select id="viralHours"><option value="today">今日（北京时间）</option><option value="24" selected>近 24 小时</option><option value="48">近 48 小时</option><option value="72">近 3 天</option><option value="168">近 7 天</option></select></label><label class="text-field"><span>粉丝上限</span><input id="viralFollowers" type="number" min="0" max="1000000" step="1" value="50000" required></label><label class="text-field"><span>点赞下限</span><input id="viralLikes" type="number" min="0" max="100000000" step="1" value="0" required></label></div>
+                            <details class="viral-advanced"><summary>更多筛选条件</summary><div class="viral-settings-grid"><label class="text-field"><span>总互动下限</span><input id="viralInteractions" type="number" min="0" max="100000000" step="1" value="500" required></label><label class="text-field"><span>互动 / 粉丝下限</span><input id="viralRatio" type="number" min="0" max="100000" step="0.01" value="0.1" required></label><label class="text-field"><span>每关键词页数</span><input id="viralPages" type="number" min="1" max="3" value="1" required></label><label class="text-field"><span>核验笔记上限</span><input id="viralCandidates" type="number" min="1" max="100" value="60" required></label><label class="text-field"><span>榜单条数</span><input id="viralLimit" type="number" min="1" max="100" value="30" required></label></div></details>
+                            <div class="viral-schedule-row"><label class="check-field"><input id="viralDaily" type="checkbox">每日定时</label><label class="text-field viral-time"><span class="visually-hidden">执行时间（北京时间）</span><input id="viralTime" type="time" value="09:00" required aria-label="执行时间（北京时间）"></label><span class="viral-timezone">北京时间</span><button class="button secondary" id="viralSave" type="button"><i data-lucide="save"></i>保存规则</button><button class="button primary" id="viralCollect" type="submit"><i data-lucide="radar"></i>立即采集</button></div>
+                        </fieldset></form>
+                    </section>
+                </section>
+
+                <section class="page-panel ai-section" data-page="ai" aria-labelledby="aiStudioTitle">
+                    <div class="page-heading ai-page-heading"><div><span class="page-kicker">AI STUDIO</span><h1 id="aiStudioTitle">AI 创作</h1><p id="aiGenerationState">正在读取 AI 配置</p></div><div class="ai-page-stats"><button class="ai-usage-card" id="billingButton" type="button"><i data-lucide="wallet-cards"></i><span><strong id="aiUsageText">每日免费额度读取中</strong><small id="aiUsageMeta">文本 1 点 · 图片 5 点</small></span><i data-lucide="chevron-right"></i></button><span class="visual-context corpus-context" id="aiCorpusStatus"><i data-lucide="database"></i>爆款素材 0 条</span><span class="visual-context" id="aiVisualCount"><i data-lucide="image"></i>视觉参考 0 张</span></div></div>
+                    <div class="view-tabs" role="tablist" aria-label="AI 创作类型"><button class="active" type="button" role="tab" aria-selected="true" data-ai-view="copy"><i data-lucide="file-pen-line"></i>文案创作</button><button type="button" role="tab" aria-selected="false" data-ai-view="image"><i data-lucide="wand-sparkles"></i>图片修改</button><button type="button" role="tab" aria-selected="false" data-ai-view="history"><i data-lucide="history"></i>创作历史</button><button type="button" role="tab" aria-selected="false" data-ai-view="corpus"><i data-lucide="library-big"></i>爆款素材库</button></div>
+
+                    <section class="ai-view active" data-ai-panel="copy" role="tabpanel">
+                        <div class="workspace-panel ai-workspace">
+                            <div class="ai-input-pane">
+                                <div class="pane-heading"><div><h2>孟哥小红书 AI 文案爆单大师</h2><p>选择策略并填写真实产品资料</p></div></div>
+                                <fieldset class="protocol-field"><legend>生成模式</legend><div class="segmented-control"><label><input type="radio" name="aiGenerationMode" value="rewrite" checked><span>仅文案</span></label><label><input type="radio" name="aiGenerationMode" value="create"><span>文案 + 配图</span></label></div></fieldset>
+                                <label class="select-field" for="aiCopywritingMode"><span>文案策略</span><select id="aiCopywritingMode"><option value="2">2. 创新性写笔记（推荐）</option><option value="3">3. 跨产品模仿（推荐）</option><option value="4">4. 定题真人种草（推荐）</option><option value="5">5. 场景化素人仿写</option><option value="1">1. 1:1 贴近仿写（仅限自有爆款）</option></select></label>
+                                <div class="ai-image-options" id="aiImageOptions" hidden><label class="select-field" for="aiImageSize"><span>图片比例</span><select id="aiImageSize"><option value="1024x1024">方图 1:1</option><option value="1024x1536">竖图 2:3</option><option value="1536x1024">横图 3:2</option></select></label><label class="select-field" for="aiImageQuality"><span>图片质量</span><select id="aiImageQuality"><option value="low">标准</option><option value="medium">精细</option><option value="high">高清</option></select></label></div>
+                                <label class="url-field" for="aiSourceText"><span id="aiSourceLabel">对标笔记正文</span><textarea id="aiSourceText" rows="6" maxlength="30000" placeholder="粘贴完整对标笔记；也可在下载页选择参考截图"></textarea></label>
+                                <div class="copywriting-fields"><label class="text-field" id="copyProductField" for="aiProductName"><span>产品或主题</span><input id="aiProductName" type="text" maxlength="300" placeholder="写清产品名称或内容主题"></label><label class="text-field" id="copyTargetField" for="aiTargetAudience"><span>目标人群</span><input id="aiTargetAudience" type="text" maxlength="1000" placeholder="例如：通勤上班族"></label><label class="url-field field-span" id="copySellingField" for="aiSellingPoints"><span>真实卖点与产品资料</span><textarea id="aiSellingPoints" class="compact-textarea" rows="3" maxlength="4000" placeholder="材质、成分、规格和有依据的卖点"></textarea></label><label class="url-field field-span" id="copyPainField" for="aiPainPoints"><span>用户痛点或场景</span><textarea id="aiPainPoints" class="compact-textarea" rows="2" maxlength="3000" placeholder="目标人群遇到的具体问题和使用场景"></textarea></label><label class="text-field field-span" id="copyKeywordsField" for="aiKeywords"><span>搜索关键词</span><input id="aiKeywords" type="text" placeholder="用逗号分隔，未指定可留空"></label><label class="text-field field-span" id="copyPurposeField" for="aiProductPurpose"><span>产品用途或作用</span><input id="aiProductPurpose" type="text" maxlength="2000" placeholder="只填写有事实依据的用途或作用"></label><label class="text-field field-span" id="copyTitleField" for="aiLockedTitle"><span>已定标题</span><input id="aiLockedTitle" type="text" maxlength="200" placeholder="未确定可留空，由 AI 提供候选"></label><label class="url-field field-span" id="copyCoverField" for="aiCoverDescription"><span>已定封面</span><textarea id="aiCoverDescription" class="compact-textarea" rows="2" maxlength="2000" placeholder="描述主体、场景、动作和画面文字"></textarea></label><label class="text-field field-span" id="copyProhibitedField" for="aiProhibitedClaims"><span>禁用表述</span><input id="aiProhibitedClaims" type="text" maxlength="2000" placeholder="不能出现的功效、词语或品牌要求"></label><label class="check-field field-span own-post-confirm" id="copyOwnPostField"><input id="aiOwnPostConfirmed" type="checkbox">确认对标笔记来自自己的账号，且已经成为爆款</label></div>
+                                <label class="url-field" for="aiInstructions"><span>补充要求</span><textarea id="aiInstructions" class="compact-textarea" rows="3" placeholder="语气、篇幅、受众或必须保留的信息"></textarea></label>
+                                <button class="button primary ai-generate-button" id="generateAIButton" type="button"><i data-lucide="sparkles"></i><span id="generateAIButtonLabel">生成文案</span></button>
+                            </div>
+                            <div class="ai-output-pane"><div class="output-heading"><span>生成结果</span><div><button class="icon-button subtle" id="clearAIOutputButton" type="button" title="清空生成结果" aria-label="清空生成结果"><i data-lucide="eraser"></i></button><button class="icon-button subtle" id="copyAIOutputButton" type="button" title="复制生成结果" aria-label="复制生成结果" disabled><i data-lucide="copy"></i></button></div></div><textarea id="aiOutput" rows="14" placeholder="AI 生成结果将在这里显示" readonly></textarea><div class="ai-image-result" id="aiImageResult" hidden><div class="generated-image-heading"><span>生成图片</span><span id="generatedImageMeta"></span></div><button class="generated-image-preview" id="generatedImagePreviewButton" type="button" title="放大查看生成图片"><img id="generatedImagePreview" alt="AI 生成图片"></button><a class="button secondary generated-image-download" id="generatedImageDownload" href="#" download><i data-lucide="download"></i>下载图片</a></div><form class="generation-feedback" id="generationFeedback" hidden><div class="generated-image-heading"><span>本次生成反馈</span><span id="knowledgeUsage"></span></div><div class="feedback-fields"><label class="select-field" for="generationRating"><span>评分</span><select id="generationRating" required><option value="">选择评分</option><option value="5">5 星</option><option value="4">4 星</option><option value="3">3 星</option><option value="2">2 星</option><option value="1">1 星</option></select></label><label class="text-field" for="generationFeedbackText"><span>具体反馈</span><input id="generationFeedbackText" type="text" maxlength="2000" placeholder="这次产出哪里好或哪里需要调整"></label></div><label class="url-field" for="reusableLesson"><span>可复用经验</span><textarea id="reusableLesson" class="compact-textarea" rows="2" maxlength="4000" placeholder="沉淀一条下次可直接复用的规则"></textarea></label><button class="button secondary" id="saveGenerationFeedback" type="submit"><i data-lucide="database-zap"></i>保存反馈</button></form></div>
+                        </div>
+                    </section>
+
+                    <section class="ai-view" data-ai-panel="image" role="tabpanel" hidden>
+                        <div class="workspace-panel image-editor">
+                            <div class="image-editor-controls">
+                                <div class="pane-heading"><div><h2>AI 图片修改</h2><p id="aiImageEditState">正在读取图片模型</p></div><span class="selection-count" id="aiEditSelectionCount">0 / 4</span></div>
+                                <div><div class="field-label-row"><span>选择已下载图片</span><button class="text-action" id="clearAIEditSelection" type="button">清空</button></div><div class="image-picker" id="aiEditImagePicker"></div></div>
+                                <label class="url-field" for="aiEditPrompt"><span>修改目标</span><textarea id="aiEditPrompt" rows="4" maxlength="4000" placeholder="例如：保留产品主体，改成明亮的居家场景，移除画面文字" required></textarea></label>
+                                <label class="url-field" for="aiEditInstructions"><span>补充要求</span><textarea id="aiEditInstructions" class="compact-textarea" rows="3" maxlength="4000" placeholder="构图、色彩、光线和禁止出现的元素"></textarea></label>
+                                <div class="ai-image-options always-visible"><label class="select-field" for="aiEditSize"><span>输出比例</span><select id="aiEditSize"><option value="1024x1024">方图 1:1</option><option value="1024x1536" selected>竖图 2:3</option><option value="1536x1024">横图 3:2</option></select></label><label class="select-field" for="aiEditQuality"><span>图片质量</span><select id="aiEditQuality"><option value="low">标准</option><option value="medium" selected>精细</option><option value="high">高清</option></select></label></div>
+                                <button class="button primary ai-generate-button" id="editAIImageButton" type="button" disabled><i data-lucide="wand-sparkles"></i>开始修改</button>
+                            </div>
+                            <div class="image-editor-output">
+                                <div class="output-heading"><span>修改结果</span><span id="aiEditResultMeta"></span></div>
+                                <div class="image-result-empty" id="aiEditEmpty"><i data-lucide="image-plus"></i><strong>等待生成</strong><span>选择图片并提交修改目标</span></div>
+                                <div class="image-edit-result" id="aiEditResult" hidden><button class="generated-image-preview edit-preview" id="aiEditPreviewButton" type="button" title="放大查看修改后的图片"><img id="aiEditPreview" alt="AI 修改后的图片"></button><div class="result-actions"><a class="button secondary" id="aiEditDownload" href="#" download><i data-lucide="download"></i>下载图片</a><button class="button secondary" id="reuseAIEditResult" type="button"><i data-lucide="rotate-ccw"></i>继续修改</button></div></div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="ai-view" data-ai-panel="history" role="tabpanel" hidden>
+                        <div class="workspace-panel record-workspace">
+                            <aside class="record-list-pane">
+                                <div class="record-toolbar"><label class="search-field"><i data-lucide="search"></i><input id="historySearch" type="search" placeholder="搜索产品、输入或结果"></label><button class="icon-button subtle" id="refreshHistoryButton" type="button" title="刷新历史" aria-label="刷新历史"><i data-lucide="refresh-cw"></i></button></div>
+                                <p class="record-summary" id="historySummary">正在读取创作历史</p>
+                                <div class="record-list" id="historyList"></div>
+                                <button class="button secondary load-more" id="historyLoadMore" type="button" hidden>加载更多</button>
+                            </aside>
+                            <article class="record-detail-pane">
+                                <div class="record-detail-empty" id="historyEmpty"><i data-lucide="notebook-tabs"></i><strong>选择一条创作记录</strong><span>可查看完整产出、参考素材和生成参数</span></div>
+                                <div class="record-detail" id="historyDetail" hidden>
+                                    <div class="record-detail-heading"><div><span class="record-kind" id="historyDetailKind"></span><h2 id="historyDetailTitle"></h2><p id="historyDetailMeta"></p></div><div class="record-actions"><button class="icon-button subtle" id="reuseHistoryButton" type="button" title="再次编辑" aria-label="再次编辑"><i data-lucide="rotate-ccw"></i></button><button class="icon-button subtle" id="copyHistoryButton" type="button" title="复制内容" aria-label="复制内容"><i data-lucide="copy"></i></button><button class="icon-button subtle danger-icon" id="deleteHistoryButton" type="button" title="删除记录" aria-label="删除记录"><i data-lucide="trash-2"></i></button></div></div>
+                                    <div class="record-facts" id="historyFacts"></div>
+                                    <div class="history-images" id="historyImages"></div>
+                                    <div class="record-section"><span>生成内容</span><pre id="historyOutput"></pre></div>
+                                    <div class="record-section" id="historySourceSection"><span>输入素材</span><pre id="historySource"></pre></div>
+                                    <div class="record-feedback" id="historyFeedback" hidden></div>
+                                </div>
+                            </article>
+                        </div>
+                    </section>
+
+                    <section class="ai-view" data-ai-panel="corpus" role="tabpanel" hidden>
+                        <div class="workspace-panel record-workspace corpus-workspace">
+                            <aside class="record-list-pane">
+                                <div class="record-toolbar"><label class="search-field"><i data-lucide="search"></i><input id="corpusSearch" type="search" placeholder="搜索商品、赛道或爆点"></label><button class="icon-button subtle" id="refreshCorpusButton" type="button" title="刷新素材库" aria-label="刷新素材库"><i data-lucide="refresh-cw"></i></button></div>
+                                <p class="record-summary" id="corpusSummary">正在读取爆款素材</p>
+                                <div class="record-list" id="corpusList"></div>
+                                <button class="button secondary load-more" id="corpusLoadMore" type="button" hidden>加载更多</button>
+                            </aside>
+                            <article class="record-detail-pane">
+                                <div class="record-detail-empty" id="corpusEmpty"><i data-lucide="library-big"></i><strong>选择一条爆款素材</strong><span>查看商品分析、账号亮点和内容切入方式</span></div>
+                                <div class="record-detail" id="corpusDetail" hidden>
+                                    <div class="record-detail-heading"><div><span class="record-kind">爆款案例</span><h2 id="corpusDetailTitle"></h2><p id="corpusDetailMeta"></p></div><div class="record-actions"><button class="button secondary compact-command" id="useCorpusButton" type="button"><i data-lucide="pen-line"></i>用于创作</button></div></div>
+                                    <div class="record-facts" id="corpusFacts"></div>
+                                    <div class="corpus-gallery" id="corpusGallery"></div>
+                                    <div class="record-section"><span>完整拆解</span><pre id="corpusContent"></pre></div>
+                                    <div class="record-links" id="corpusLinks"></div>
+                                </div>
+                            </article>
+                        </div>
+                    </section>
+                </section>
+            </main>
         </div>
-        <div class="enhancement-strip" id="enhancementPanel" hidden aria-live="polite">
-            <div class="enhancement-copy"><i data-lucide="sparkles"></i><div><strong id="enhancementTitle">清晰增强</strong><span id="enhancementDetail"></span></div></div>
-            <div class="enhancement-progress"><div class="progress-track"><div class="progress-bar" id="enhancementProgress"></div></div><span class="state-pill" id="enhancementState"></span></div>
-        </div>
-        <div class="file-table-wrap">
-            <table class="file-table">
-                <thead><tr><th class="select-cell"><input id="selectAllFiles" type="checkbox" aria-label="全选文件"></th><th class="preview-cell">预览</th><th>文件名</th><th>格式</th><th>大小</th><th>修改时间</th><th class="action-cell"></th></tr></thead>
-                <tbody id="fileList"></tbody>
-            </table>
-            <div class="empty-state" id="fileEmpty"><i data-lucide="folder-search"></i><span>暂无已下载文件</span></div>
-        </div>
-    </section>
-</main>
+    </div>
 </div>
 
 <dialog id="accountDialog">
@@ -167,6 +241,37 @@
     </div>
 </dialog>
 
+<dialog id="viralNoteDialog">
+    <div class="dialog-shell">
+        <div class="dialog-heading"><div><h2 id="viralNoteTitle"></h2><p id="viralNoteMeta"></p></div><button class="icon-button subtle" id="viralNoteClose" type="button" title="关闭笔记" aria-label="关闭笔记"><i data-lucide="x"></i></button></div>
+        <p class="viral-note-body" id="viralNoteBody"></p>
+        <div class="dialog-actions"><a class="button secondary" id="viralNoteLink" target="_blank" rel="noopener noreferrer"><i data-lucide="external-link"></i>查看原笔记</a></div>
+    </div>
+</dialog>
+
+<dialog id="knowledgeDialog" class="knowledge-dialog">
+    <div class="dialog-shell">
+        <div class="dialog-heading"><div><h2>本地知识库</h2><p id="knowledgeSummary">正在读取知识条目</p></div><button class="icon-button subtle dialog-close" type="button" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <form class="knowledge-form" id="knowledgeForm">
+            <div class="knowledge-form-row">
+                <label class="select-field" for="knowledgeKind"><span>类型</span><select id="knowledgeKind"><option value="general">通用策略</option><option value="note">笔记策略</option><option value="image">图片策略</option></select></label>
+                <label class="text-field" for="knowledgePriority"><span>优先级</span><input id="knowledgePriority" type="number" min="0" max="100" value="50" required></label>
+                <label class="check-field knowledge-active"><input id="knowledgeActive" type="checkbox" checked>启用</label>
+            </div>
+            <label class="text-field" for="knowledgeTitle"><span>标题</span><input id="knowledgeTitle" type="text" minlength="1" maxlength="120" placeholder="例如：母婴笔记的事实边界" required></label>
+            <label class="text-field" for="knowledgeTags"><span>标签</span><input id="knowledgeTags" type="text" placeholder="用逗号分隔，例如：母婴，测评，标题"></label>
+            <label class="url-field" for="knowledgeContent"><span>策略内容</span><textarea id="knowledgeContent" rows="4" maxlength="8000" placeholder="写入可执行、可复用的创作规则" required></textarea></label>
+            <div class="knowledge-form-actions"><button class="button secondary" id="resetKnowledgeForm" type="button"><i data-lucide="file-plus-2"></i>新建</button><button class="button primary" id="saveKnowledgeEntry" type="submit"><i data-lucide="save"></i><span>保存条目</span></button></div>
+        </form>
+        <div class="dialog-divider"></div>
+        <div class="knowledge-toolbar">
+            <label class="search-field"><i data-lucide="search"></i><input id="knowledgeSearch" type="search" placeholder="搜索知识"></label>
+            <label class="select-field compact-select" for="knowledgeFilter"><span class="visually-hidden">筛选类型</span><select id="knowledgeFilter"><option value="">全部类型</option><option value="general">通用策略</option><option value="note">笔记策略</option><option value="image">图片策略</option></select></label>
+        </div>
+        <div class="knowledge-list" id="knowledgeList"></div>
+    </div>
+</dialog>
+
 <dialog id="settingsDialog">
     <form method="dialog" class="dialog-shell" id="cookieForm">
         <div class="dialog-heading"><div><h2>Cookie 设置</h2><p id="cookieState">未配置</p></div><button class="icon-button subtle" value="cancel" aria-label="关闭"><i data-lucide="x"></i></button></div>
@@ -190,6 +295,18 @@
     </form>
 </dialog>
 
+<dialog id="billingDialog" class="billing-dialog">
+    <div class="dialog-shell">
+        <div class="dialog-heading"><div><span class="page-kicker">USAGE & BILLING</span><h2>用量与套餐</h2><p id="billingSummary">按点数计费，生成失败会自动退回预扣点数。</p></div><button class="icon-button subtle dialog-close" type="button" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="billing-usage-panel"><div><span>今日免费点数</span><strong id="billingFreeRemaining">--</strong><small id="billingUsageDate"></small></div><div><span>付费点数</span><strong id="billingPaidCredits">--</strong><small>可跨天使用</small></div><div><span>生成成本</span><strong>1 / 5 点</strong><small>文本 / 图片</small></div></div>
+        <div class="billing-plan-grid" id="billingPlans"><div class="empty-state">正在读取套餐</div></div>
+        <p class="billing-note"><i data-lucide="info"></i><span>套餐价格和额度是可配置的默认方案；接入微信支付、支付宝或 Stripe 后，再由支付回调把订单状态更新为已支付并发放点数。</span></p>
+    </div>
+</dialog>
+
+<dialog id="slideshowDialog" class="dialog">
+    <div class="dialog-shell"><div class="dialog-heading"><div><h2>图片成片</h2><p>将已选图片合成为竖屏视频</p></div><button class="icon-button subtle dialog-close" type="button" aria-label="关闭"><i data-lucide="x"></i></button></div><label class="select-field"><span>单张图片时长（秒）</span><input id="slideshowSeconds" type="number" min="0.5" max="15" step="0.5" value="2.5"></label><label class="select-field"><span>背景音乐</span><select id="slideshowMusic"><option value="">无音乐</option></select></label><button class="button primary" id="createSlideshowButton" type="button"><i data-lucide="film"></i>生成视频</button></div>
+</dialog>
 <dialog id="mediaViewerDialog" class="media-viewer-dialog">
     <div class="media-viewer-shell">
         <div class="media-viewer-heading"><div><h2 id="mediaViewerTitle">媒体预览</h2><p id="mediaViewerMeta"></p></div><div><a class="icon-button" id="mediaViewerDownload" href="#" title="下载当前文件" aria-label="下载当前文件"><i data-lucide="download"></i></a><button class="icon-button" id="closeMediaViewerButton" type="button" title="关闭预览" aria-label="关闭预览"><i data-lucide="x"></i></button></div></div>
@@ -209,5 +326,6 @@
 
 <script src="/assets/lucide.min.js"></script>
 <script src="/assets/app.js"></script>
+<script src="/assets/viral.js"></script>
 </body>
 </html>
