@@ -32,3 +32,5 @@ uvicorn==0.52.4
     # via xhs-downloader (pyproject.toml)
 websockets==17.1
     # via xhs-downloader (pyproject.toml)
+xhshow==0.2.0
+    # via xhs-downloader (pyproject.toml)

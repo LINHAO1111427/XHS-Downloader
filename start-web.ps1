@@ -14,6 +14,22 @@ $installDir = Join-Path $PSScriptRoot ".install"
 $pidFile = Join-Path $installDir "web-server.pid"
 $stdout = Join-Path $installDir "web-server.stdout.log"
 $stderr = Join-Path $installDir "web-server.stderr.log"
+$dataRoot = Join-Path $PSScriptRoot "Volume"
+$tempRoot = Join-Path $dataRoot "Temp"
+
+if ([System.IO.Path]::GetPathRoot($dataRoot) -ieq "C:\") {
+    throw "Local data directory must not be on drive C: $dataRoot"
+}
+
+New-Item -ItemType Directory -Force -Path $dataRoot, $tempRoot | Out-Null
+$env:XHS_LOCAL_DATA_ROOT = $dataRoot
+$env:XHS_AI_CONFIG_PATH = Join-Path $dataRoot "ai_config.json"
+$env:XHS_AUTH_DB_PATH = Join-Path $dataRoot "users.db"
+$env:XHS_KNOWLEDGE_DB_PATH = Join-Path $dataRoot "knowledge.db"
+$env:XHS_VIRAL_DB_PATH = Join-Path $dataRoot "viral_notes.db"
+$env:XHS_FEISHU_CORPUS_PATH = Join-Path $PSScriptRoot "output\feishu_export\entries.json"
+$env:TEMP = $tempRoot
+$env:TMP = $tempRoot
 
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
