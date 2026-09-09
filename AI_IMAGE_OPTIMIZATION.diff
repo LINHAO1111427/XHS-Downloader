@@ -1,0 +1,205 @@
+diff --git a/tests/test_web_app.py b/tests/test_web_app.py
+index 56a2bf4..fb9287b 100644
+--- a/tests/test_web_app.py
++++ b/tests/test_web_app.py
+@@ -15,7 +15,7 @@ from PIL import Image
+ from ai_gateway import AIConfigStore, AIGateway
+ from auth import AuthStore, LoginThrottle
+ from media_enhancer import enhance_media
+-from web_app import create_app
++from web_app import MAX_AI_IMAGE_BYTES, MAX_AI_IMAGE_EDGE, create_app
+ 
+ 
+ class FakeRuntime:
+@@ -528,6 +528,34 @@ class WebAppTests(unittest.TestCase):
+             )
+             self.assertEqual(generated.json()["generated_images"], [])
+ 
++            large_image = self.download_root / "note" / "large-reference.png"
++            Image.effect_noise((2600, 2600), 100).convert("RGB").save(
++                large_image,
++                format="PNG",
++                compress_level=0,
++            )
++            self.assertGreater(large_image.stat().st_size, MAX_AI_IMAGE_BYTES)
++            optimized = self.client.post(
++                "/api/ai/generate",
++                json={
++                    "mode": "rewrite",
++                    "source_text": "大图自动优化测试",
++                    "image_paths": ["note/large-reference.png"],
++                },
++            )
++            self.assertEqual(optimized.status_code, 200)
++            optimization = optimized.json()["image_optimization"]
++            self.assertEqual(optimization["optimized_count"], 1)
++            self.assertGreater(optimization["saved_bytes"], 0)
++            optimized_url = ModelsHandler.last_payload["input"][0]["content"][1][
++                "image_url"
++            ]
++            self.assertTrue(optimized_url.startswith("data:image/jpeg;base64,"))
++            optimized_data = base64.b64decode(optimized_url.split(",", 1)[1])
++            self.assertLessEqual(len(optimized_data), MAX_AI_IMAGE_BYTES)
++            with Image.open(BytesIO(optimized_data)) as prepared:
++                self.assertLessEqual(max(prepared.size), MAX_AI_IMAGE_EDGE)
++
+             created = self.client.post(
+                 "/api/ai/generate",
+                 json={
+diff --git a/web_app.py b/web_app.py
+index cf1ccfa..9c6ca46 100644
+--- a/web_app.py
++++ b/web_app.py
+@@ -6,6 +6,7 @@ import os
+ from contextlib import asynccontextmanager
+ from datetime import datetime
+ from hmac import compare_digest
++from io import BytesIO
+ from mimetypes import guess_type
+ from pathlib import Path
+ from secrets import token_hex
+@@ -18,6 +19,7 @@ import uvicorn
+ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+ from fastapi.responses import FileResponse
+ from fastapi.staticfiles import StaticFiles
++from PIL import Image, ImageOps, UnidentifiedImageError
+ from pydantic import BaseModel, Field
+ from starlette.background import BackgroundTask
+ 
+@@ -61,8 +63,11 @@ AI_IMAGE_TYPES = {
+     ".png": "image/png",
+     ".webp": "image/webp",
+ }
+-MAX_AI_IMAGE_BYTES = 8 * 1024 * 1024
++MAX_AI_IMAGE_SOURCE_BYTES = 64 * 1024 * 1024
++MAX_AI_IMAGE_BYTES = 4 * 1024 * 1024
+ MAX_AI_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024
++MAX_AI_IMAGE_EDGE = 2048
++AI_IMAGE_JPEG_QUALITIES = (88, 76, 64, 52)
+ SESSION_COOKIE = "xhs_session"
+ 
+ 
+@@ -211,6 +216,73 @@ def _resolve_file(root: Path, relative_path: str) -> Path:
+     return target
+ 
+ 
++def _prepare_ai_image(
++    path: Path,
++    mime_type: str,
++) -> tuple[str, bytes, dict | None]:
++    source_bytes = path.stat().st_size
++    if source_bytes <= MAX_AI_IMAGE_BYTES:
++        return mime_type, path.read_bytes(), None
++    if source_bytes > MAX_AI_IMAGE_SOURCE_BYTES:
++        raise HTTPException(
++            status_code=413,
++            detail=f"图片超过 64 MB，无法自动优化：{path.name}",
++        )
++
++    try:
++        with Image.open(path) as source:
++            source.load()
++            image = ImageOps.exif_transpose(source)
++            if "A" in image.getbands() or (
++                image.mode == "P" and "transparency" in image.info
++            ):
++                rgba = image.convert("RGBA")
++                rgb = Image.new("RGB", rgba.size, "white")
++                rgb.paste(rgba, mask=rgba.getchannel("A"))
++            else:
++                rgb = image.convert("RGB")
++
++            for edge in (MAX_AI_IMAGE_EDGE, 1600, 1280, 1024):
++                prepared = rgb.copy()
++                prepared.thumbnail(
++                    (edge, edge),
++                    Image.Resampling.LANCZOS,
++                    reducing_gap=2.0,
++                )
++                for quality in AI_IMAGE_JPEG_QUALITIES:
++                    buffer = BytesIO()
++                    prepared.save(
++                        buffer,
++                        format="JPEG",
++                        quality=quality,
++                        optimize=True,
++                        progressive=True,
++                    )
++                    data = buffer.getvalue()
++                    if len(data) <= MAX_AI_IMAGE_BYTES:
++                        return (
++                            "image/jpeg",
++                            data,
++                            {
++                                "path": path.name,
++                                "original_bytes": source_bytes,
++                                "optimized_bytes": len(data),
++                                "width": prepared.width,
++                                "height": prepared.height,
++                            },
++                        )
++    except (Image.DecompressionBombError, UnidentifiedImageError, OSError) as error:
++        raise HTTPException(
++            status_code=422,
++            detail=f"图片无法自动优化：{path.name}",
++        ) from error
++
++    raise HTTPException(
++        status_code=413,
++        detail=f"图片优化后仍超过 4 MB：{path.name}",
++    )
++
++
+ def _generated_image_suffix(data: bytes) -> str:
+     if data.startswith(b"\x89PNG\r\n\x1a\n"):
+         return ".png"
+@@ -669,6 +741,7 @@ def create_app(
+             _resolve_file(root, value) for value in dict.fromkeys(request.image_paths)
+         ]
+         images: list[tuple[str, bytes]] = []
++        optimized_images: list[dict] = []
+         total_bytes = 0
+         for path in selected:
+             mime_type = AI_IMAGE_TYPES.get(path.suffix.lower())
+@@ -677,16 +750,16 @@ def create_app(
+                     status_code=422,
+                     detail=f"图片格式不支持 AI 识别：{path.name}",
+                 )
+-            size = path.stat().st_size
+-            if size > MAX_AI_IMAGE_BYTES:
++            prepared_type, data, optimization = _prepare_ai_image(path, mime_type)
++            total_bytes += len(data)
++            if total_bytes > MAX_AI_IMAGE_TOTAL_BYTES:
+                 raise HTTPException(
+                     status_code=413,
+-                    detail=f"图片超过 8 MB：{path.name}",
++                    detail="图片自动优化后总大小仍超过 20 MB",
+                 )
+-            total_bytes += size
+-            if total_bytes > MAX_AI_IMAGE_TOTAL_BYTES:
+-                raise HTTPException(status_code=413, detail="图片总大小超过 20 MB")
+-            images.append((mime_type, path.read_bytes()))
++            images.append((prepared_type, data))
++            if optimization:
++                optimized_images.append(optimization)
+         if not request.source_text.strip() and not images:
+             raise HTTPException(status_code=422, detail="请输入内容或选择参考图片")
+         try:
+@@ -700,6 +773,17 @@ def create_app(
+             raise HTTPException(status_code=409, detail=str(error)) from error
+         except AIGatewayConnectionError as error:
+             raise HTTPException(status_code=502, detail=str(error)) from error
++        result["image_optimization"] = {
++            "optimized_count": len(optimized_images),
++            "original_bytes": sum(
++                item["original_bytes"] for item in optimized_images
++            ),
++            "prepared_bytes": total_bytes,
++            "saved_bytes": sum(
++                item["original_bytes"] - item["optimized_bytes"]
++                for item in optimized_images
++            ),
++        }
+         result["generated_images"] = []
+         if not request.generate_image:
+             return result

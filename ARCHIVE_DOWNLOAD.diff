@@ -1,0 +1,28 @@
+diff --git a/static/web/app.js b/static/web/app.js
+index dfa7e64..274a346 100644
+--- a/static/web/app.js
++++ b/static/web/app.js
+@@ -751,15 +751,21 @@ async function downloadArchive() {
+     elements.archiveButton.disabled = true;
+     try {
+         const response = await fetch("/api/archive", {
+-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths: [...selectedFiles] }),
++            method: "POST",
++            credentials: "same-origin",
++            headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
++            body: JSON.stringify({ paths: [...selectedFiles] }),
+         });
+         if (!response.ok) throw new Error((await response.json()).detail || "打包失败");
+         const url = URL.createObjectURL(await response.blob());
+         const link = document.createElement("a");
+         link.href = url;
+         link.download = "xiaohongshu-download.zip";
++        link.hidden = true;
++        document.body.append(link);
+         link.click();
+-        URL.revokeObjectURL(url);
++        link.remove();
++        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+     } catch (error) { showToast(error.message, true); }
+     finally { updateSelection(); }
+ }

@@ -32,8 +32,14 @@ const elements = {
     librarySummary: byId("librarySummary"),
     selectAllFiles: byId("selectAllFiles"),
     enhanceButton: byId("enhanceButton"),
+    livePhotoButton: byId("livePhotoButton"),
     archiveButton: byId("archiveButton"),
     refreshLibraryButton: byId("refreshLibraryButton"),
+    alibabaUrls: byId("alibabaUrls"),
+    alibabaKeyword: byId("alibabaKeyword"),
+    alibabaCollect: byId("alibabaCollect"),
+    alibabaProducts: byId("alibabaProducts"),
+    alibabaSummary: byId("alibabaSummary"),
     openFolderButton: byId("openFolderButton"),
     livePhotoBadge: byId("livePhotoBadge"),
     aiGenerationState: byId("aiGenerationState"),
@@ -53,6 +59,7 @@ const elements = {
     generatedImageMeta: byId("generatedImageMeta"),
     generatedImagePreviewButton: byId("generatedImagePreviewButton"),
     generatedImagePreview: byId("generatedImagePreview"),
+    generatedImageLivePhoto: byId("generatedImageLivePhoto"),
     generatedImageDownload: byId("generatedImageDownload"),
     aiSettingsButton: byId("aiSettingsButton"),
     adminUsersButton: byId("adminUsersButton"),
@@ -95,6 +102,21 @@ const elements = {
     enhancementDetail: byId("enhancementDetail"),
     enhancementProgress: byId("enhancementProgress"),
     enhancementState: byId("enhancementState"),
+    livePhotoPanel: byId("livePhotoPanel"),
+    livePhotoTitle: byId("livePhotoTitle"),
+    livePhotoDetail: byId("livePhotoDetail"),
+    livePhotoState: byId("livePhotoState"),
+    livePhotoDialog: byId("livePhotoDialog"),
+    livePhotoForm: byId("livePhotoForm"),
+    livePhotoMeta: byId("livePhotoMeta"),
+    livePhotoImage: byId("livePhotoImage"),
+    livePhotoVideo: byId("livePhotoVideo"),
+    liveStartField: byId("liveStartField"),
+    liveStartRange: byId("liveStartRange"),
+    liveStartValue: byId("liveStartValue"),
+    liveDurationRange: byId("liveDurationRange"),
+    liveDurationValue: byId("liveDurationValue"),
+    createLivePhotoButton: byId("createLivePhotoButton"),
     mediaViewerDialog: byId("mediaViewerDialog"),
     mediaViewerTitle: byId("mediaViewerTitle"),
     mediaViewerMeta: byId("mediaViewerMeta"),
@@ -109,14 +131,18 @@ const elements = {
 };
 
 const ENHANCEABLE_SUFFIXES = new Set(["jpeg", "jpg", "png", "webp", "m4v", "mov", "mp4"]);
+const LIVE_PHOTO_SUFFIXES = new Set(["jpeg", "jpg", "png", "webp", "m4v", "mov", "mp4"]);
 let currentState = null;
 let libraryItems = [];
 let enhancementTasks = [];
+let livePhotoTasks = [];
 let selectedFiles = new Set();
 let toastTimer = null;
 let previousTaskFingerprint = "";
 let previousEnhancementFingerprint = "";
+let previousLivePhotoFingerprint = "";
 let currentMediaIndex = -1;
+let livePhotoSource = null;
 let currentUser = null;
 let csrfToken = "";
 let authStatus = { needs_setup: false, registration_enabled: true };
@@ -125,6 +151,12 @@ let authGeneration = 0;
 
 function refreshIcons() {
     if (window.lucide) window.lucide.createIcons({ attrs: { "stroke-width": 1.8 } });
+}
+
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[character]);
 }
 
 class APIError extends Error {
@@ -231,7 +263,7 @@ async function enterWorkspace(session) {
     refreshIcons();
     stopPolling();
     try {
-        await Promise.all([refreshState(), refreshLibrary(), refreshEnhancements(), loadAIConfig()]);
+        await Promise.all([refreshState(), refreshLibrary(), refreshEnhancements(), refreshLivePhotos(), loadAIConfig(), loadAlibabaProducts()]);
     } catch (error) {
         if (error.status !== 401) showToast(error.message, true);
     }
@@ -239,6 +271,7 @@ async function enterWorkspace(session) {
     pollTimers = [
         setInterval(refreshState, 1000),
         setInterval(refreshEnhancements, 1000),
+        setInterval(refreshLivePhotos, 1000),
         setInterval(refreshLibrary, 5000),
     ];
 }
@@ -504,6 +537,9 @@ function updateSelection() {
     const hasActiveEnhancement = enhancementTasks.some((task) => ["pending", "processing"].includes(task.state));
     elements.enhanceButton.disabled = mediaCount === 0 || hasActiveEnhancement;
     elements.enhanceButton.lastChild.textContent = mediaCount ? `清晰增强 2x (${mediaCount})` : "清晰增强 2x";
+    const liveMedia = selectedLiveMedia();
+    const hasActiveLivePhoto = livePhotoTasks.some((task) => ["pending", "processing"].includes(task.state));
+    elements.livePhotoButton.disabled = selectedFiles.size !== 1 || liveMedia.length !== 1 || hasActiveLivePhoto;
     const aiImages = selectedAIImages();
     const usedCount = Math.min(aiImages.length, 4);
     elements.aiVisualCount.lastChild.textContent = aiImages.length > 4
@@ -514,6 +550,10 @@ function updateSelection() {
 
 function selectedAIImages() {
     return libraryItems.filter((item) => selectedFiles.has(item.path) && item.ai_compatible);
+}
+
+function selectedLiveMedia() {
+    return libraryItems.filter((item) => selectedFiles.has(item.path) && item.live_convertible !== false && LIVE_PHOTO_SUFFIXES.has(item.suffix));
 }
 
 function previewableMedia() {
@@ -624,6 +664,22 @@ function renderEnhancements() {
     refreshIcons();
 }
 
+function renderLivePhotos() {
+    const task = livePhotoTasks[0];
+    elements.livePhotoPanel.hidden = !task;
+    if (!task) { updateSelection(); return; }
+    const sourceName = task.source.split("/").pop();
+    elements.livePhotoTitle.textContent = task.source_kind === "image" ? "图片生成实况" : "视频裁剪实况";
+    if (task.state === "success") elements.livePhotoDetail.textContent = `已生成 ${task.output.split("/").pop()}`;
+    else if (task.state === "failed") elements.livePhotoDetail.textContent = task.error || "生成失败";
+    else if (task.state === "processing") elements.livePhotoDetail.textContent = `正在处理 ${sourceName}`;
+    else elements.livePhotoDetail.textContent = `${sourceName} 即将开始`;
+    elements.livePhotoState.className = `state-pill ${task.state}`;
+    elements.livePhotoState.textContent = enhancementLabel(task.state);
+    updateSelection();
+    refreshIcons();
+}
+
 function renderLibrary() {
     const visible = filteredLibrary();
     elements.fileList.replaceChildren();
@@ -720,6 +776,17 @@ async function refreshEnhancements() {
     } catch (error) { showToast(error.message, true); }
 }
 
+async function refreshLivePhotos() {
+    try {
+        const result = await api("/api/live-photos");
+        livePhotoTasks = result.tasks;
+        const fingerprint = livePhotoTasks.map((task) => `${task.task_id}:${task.state}:${task.output}`).join("|");
+        if (fingerprint !== previousLivePhotoFingerprint && /success/.test(fingerprint)) await refreshLibrary();
+        previousLivePhotoFingerprint = fingerprint;
+        renderLivePhotos();
+    } catch (error) { showToast(error.message, true); }
+}
+
 async function pasteLink() {
     try {
         let content = "";
@@ -738,6 +805,18 @@ async function createDownload() {
     if (!content) { showToast("请先粘贴笔记链接", true); elements.urlInput.focus(); return; }
     elements.downloadButton.disabled = true;
     try {
+        // The main input also accepts 1688 mobile share text for a seamless workflow.
+        if (/1688\.com|阿里|1688/i.test(content)) {
+            const result = await api("/api/1688/collect", {
+                method: "POST",
+                body: JSON.stringify({ urls: [content], limit: 100 }),
+            });
+            elements.alibabaUrls.value = content;
+            renderAlibabaProducts(result.products || []);
+            showToast(`1688 商品采集完成，共 ${result.total} 个`);
+            elements.urlInput.value = "";
+            return;
+        }
         const result = await api("/api/tasks", { method: "POST", body: JSON.stringify({ content }) });
         showToast(`已创建 ${result.tasks.length} 个下载任务`);
         elements.urlInput.value = "";
@@ -751,15 +830,21 @@ async function downloadArchive() {
     elements.archiveButton.disabled = true;
     try {
         const response = await fetch("/api/archive", {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths: [...selectedFiles] }),
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+            body: JSON.stringify({ paths: [...selectedFiles] }),
         });
         if (!response.ok) throw new Error((await response.json()).detail || "打包失败");
         const url = URL.createObjectURL(await response.blob());
         const link = document.createElement("a");
         link.href = url;
         link.download = "xiaohongshu-download.zip";
+        link.hidden = true;
+        document.body.append(link);
         link.click();
-        URL.revokeObjectURL(url);
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (error) { showToast(error.message, true); }
     finally { updateSelection(); }
 }
@@ -776,6 +861,85 @@ async function createEnhancement() {
         await refreshEnhancements();
     } catch (error) { showToast(error.message, true); }
     finally { updateSelection(); }
+}
+
+function syncLivePhotoControls() {
+    const isVideo = livePhotoSource?.media_kind === "video";
+    let start = Number(elements.liveStartRange.value) || 0;
+    const sourceDuration = elements.livePhotoVideo.duration;
+    if (isVideo && Number.isFinite(sourceDuration)) {
+        const maxStart = Math.max(0, sourceDuration - 0.5);
+        elements.liveStartRange.max = maxStart.toFixed(1);
+        start = Math.min(start, maxStart);
+        elements.liveStartRange.value = start.toFixed(1);
+        const maxDuration = Math.max(0.5, Math.min(5, sourceDuration - start));
+        elements.liveDurationRange.max = maxDuration.toFixed(1);
+        if (Number(elements.liveDurationRange.value) > maxDuration) {
+            elements.liveDurationRange.value = maxDuration.toFixed(1);
+        }
+    } else {
+        elements.liveStartRange.max = "0";
+        elements.liveDurationRange.max = "5";
+    }
+    elements.liveStartValue.textContent = `${start.toFixed(1)} 秒`;
+    elements.liveDurationValue.textContent = `${Number(elements.liveDurationRange.value).toFixed(1)} 秒`;
+}
+
+function resetLivePhotoEditor() {
+    elements.livePhotoVideo.pause();
+    elements.livePhotoVideo.removeAttribute("src");
+    elements.livePhotoVideo.load();
+    elements.livePhotoVideo.hidden = true;
+    elements.livePhotoImage.removeAttribute("src");
+    elements.livePhotoImage.hidden = true;
+    livePhotoSource = null;
+}
+
+function openLivePhotoEditor() {
+    const source = selectedLiveMedia()[0];
+    if (!source || selectedFiles.size !== 1) return;
+    resetLivePhotoEditor();
+    livePhotoSource = source;
+    elements.livePhotoMeta.textContent = `${source.media_kind === "image" ? "图片" : "视频"} · ${source.name} · ${formatBytes(source.size)}`;
+    elements.liveStartRange.value = "0";
+    elements.liveDurationRange.value = "3";
+    elements.liveStartField.hidden = source.media_kind !== "video";
+    if (source.media_kind === "video") {
+        elements.livePhotoVideo.src = source.preview_url;
+        elements.livePhotoVideo.hidden = false;
+    } else {
+        elements.livePhotoImage.src = source.preview_url;
+        elements.livePhotoImage.alt = source.name;
+        elements.livePhotoImage.hidden = false;
+    }
+    syncLivePhotoControls();
+    elements.livePhotoDialog.showModal();
+    refreshIcons();
+}
+
+async function createLivePhoto(event) {
+    event.preventDefault();
+    if (!livePhotoSource) return;
+    const sourceKind = livePhotoSource.media_kind;
+    elements.createLivePhotoButton.disabled = true;
+    try {
+        const result = await api("/api/live-photos", {
+            method: "POST",
+            body: JSON.stringify({
+                path: livePhotoSource.path,
+                start: livePhotoSource.media_kind === "video" ? Number(elements.liveStartRange.value) : 0,
+                duration: Number(elements.liveDurationRange.value),
+            }),
+        });
+        elements.livePhotoDialog.close();
+        selectedFiles.clear();
+        renderLibrary();
+        livePhotoTasks = [result.task, ...livePhotoTasks];
+        renderLivePhotos();
+        showToast(sourceKind === "video" ? "视频裁剪任务已提交" : "图片转实况任务已提交");
+        await refreshLivePhotos();
+    } catch (error) { showToast(error.message, true); }
+    finally { elements.createLivePhotoButton.disabled = false; }
 }
 
 function renderAIConfig(config) {
@@ -809,6 +973,8 @@ function clearGeneratedImage() {
     elements.aiImageResult.hidden = true;
     elements.generatedImagePreview.removeAttribute("src");
     elements.generatedImagePreviewButton.dataset.path = "";
+    elements.generatedImageLivePhoto.dataset.path = "";
+    elements.generatedImageLivePhoto.disabled = true;
     elements.generatedImageDownload.href = "#";
     elements.generatedImageDownload.removeAttribute("download");
     elements.generatedImageMeta.textContent = "";
@@ -823,6 +989,8 @@ function renderGeneratedImage(item, model, size) {
     elements.generatedImagePreviewButton.style.aspectRatio = `${width} / ${height}`;
     elements.generatedImagePreview.src = item.preview_url;
     elements.generatedImagePreviewButton.dataset.path = item.path;
+    elements.generatedImageLivePhoto.dataset.path = item.path;
+    elements.generatedImageLivePhoto.disabled = false;
     elements.generatedImageMeta.textContent = `${model} · ${formatBytes(item.size)}`;
     elements.generatedImageDownload.href = item.download_url;
     elements.generatedImageDownload.download = item.name;
@@ -902,6 +1070,37 @@ async function copyAIOutput() {
         if (!copied) throw new Error("复制失败，请手动选择文本");
         showToast("生成结果已复制");
     }
+}
+
+function renderAlibabaProducts(products) {
+    elements.alibabaSummary.textContent = products.length ? `已采集 ${products.length} 个商品` : "暂无采集结果";
+    if (!products.length) {
+        elements.alibabaProducts.innerHTML = '<div class="empty-state"><i data-lucide="package-open"></i><span>暂无商品</span></div>';
+        refreshIcons();
+        return;
+    }
+    elements.alibabaProducts.innerHTML = products.map((item) => { const images = (item.images || []).map((url) => url.startsWith("http") ? url : `/api/1688/assets/${url.replaceAll("\\\\", "/")}`); return `<article class="alibaba-card">
+        ${images.length ? `<div class="alibaba-gallery">${images.slice(0, 6).map((url) => `<img src="${escapeHtml(url)}" alt="" loading="lazy">`).join("")}</div>` : '<div class="alibaba-placeholder"><i data-lucide="image"></i></div>'}
+        <div><h3>${escapeHtml(item.title || "未命名商品")}</h3><p>${escapeHtml(item.price ? `参考价 ${item.price}` : (item.shop || "1688 商品"))}</p><p class="alibaba-specs">${Object.entries(item.specs || {}).slice(0, 4).map(([k,v]) => `${escapeHtml(k)}：${escapeHtml(v)}`).join(" · ")}</p><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">查看源商品</a></div>
+    </article>`; }).join("");
+    refreshIcons();
+}
+
+async function loadAlibabaProducts() {
+    const result = await api("/api/1688/products");
+    renderAlibabaProducts(result.products || []);
+}
+
+async function collectAlibabaProducts() {
+    const urls = elements.alibabaUrls.value.split(/\r?\n/).map((url) => url.trim()).filter(Boolean);
+    elements.alibabaCollect.disabled = true;
+    elements.alibabaSummary.textContent = "正在采集公开商品页面…";
+    try {
+        const result = await api("/api/1688/collect", { method: "POST", body: JSON.stringify({ urls, keyword: elements.alibabaKeyword.value, limit: 100 }) });
+        renderAlibabaProducts(result.products || []);
+        showToast(`1688 商品采集完成，共 ${result.total} 个`);
+    } catch (error) { showToast(error.message, true); }
+    finally { elements.alibabaCollect.disabled = false; }
 }
 
 async function persistAIConfig(closeDialog = true) {
@@ -991,11 +1190,26 @@ elements.urlInput.addEventListener("keydown", (event) => { if ((event.ctrlKey ||
 elements.clearTasksButton.addEventListener("click", async () => { try { await api("/api/tasks", { method: "DELETE" }); await refreshState(); } catch (error) { showToast(error.message, true); } });
 elements.fileSearch.addEventListener("input", renderLibrary);
 elements.refreshLibraryButton.addEventListener("click", refreshLibrary);
+elements.alibabaCollect.addEventListener("click", collectAlibabaProducts);
 elements.selectAllFiles.addEventListener("change", () => {
     filteredLibrary().forEach((item) => { if (elements.selectAllFiles.checked) selectedFiles.add(item.path); else selectedFiles.delete(item.path); });
     renderLibrary();
 });
 elements.enhanceButton.addEventListener("click", createEnhancement);
+elements.livePhotoButton.addEventListener("click", openLivePhotoEditor);
+elements.livePhotoForm.addEventListener("submit", createLivePhoto);
+elements.livePhotoVideo.addEventListener("loadedmetadata", syncLivePhotoControls);
+elements.liveStartRange.addEventListener("input", () => {
+    syncLivePhotoControls();
+    if (Number.isFinite(elements.livePhotoVideo.duration)) {
+        elements.livePhotoVideo.currentTime = Number(elements.liveStartRange.value);
+    }
+});
+elements.liveDurationRange.addEventListener("input", syncLivePhotoControls);
+elements.livePhotoDialog.addEventListener("close", resetLivePhotoEditor);
+elements.livePhotoDialog.addEventListener("click", (event) => {
+    if (event.target === elements.livePhotoDialog) elements.livePhotoDialog.close();
+});
 elements.archiveButton.addEventListener("click", downloadArchive);
 elements.aiGenerationModes.forEach((input) => input.addEventListener("change", syncAIGenerationMode));
 elements.generateAIButton.addEventListener("click", generateAIContent);
@@ -1014,6 +1228,16 @@ elements.generatedImagePreviewButton.addEventListener("click", async () => {
     await refreshLibrary();
     const item = libraryItems.find((entry) => entry.path === path);
     if (item) openMediaViewer(item);
+});
+elements.generatedImageLivePhoto.addEventListener("click", async () => {
+    const path = elements.generatedImageLivePhoto.dataset.path;
+    if (!path) return;
+    await refreshLibrary();
+    const item = libraryItems.find((entry) => entry.path === path);
+    if (!item) return;
+    selectedFiles = new Set([path]);
+    renderLibrary();
+    openLivePhotoEditor();
 });
 elements.openFolderButton.addEventListener("click", async () => { try { await api("/api/folder/open", { method: "POST" }); } catch (error) { showToast(error.message, true); } });
 elements.aiSettingsButton.addEventListener("click", async () => {

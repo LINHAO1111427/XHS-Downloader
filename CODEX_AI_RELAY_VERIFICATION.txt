@@ -1,0 +1,70 @@
+CODEX AI RELAY CONFIGURATION VERIFICATION
+=========================================
+
+CHANGED_BRANCH: Volume/ai_config.json AI relay connection used by image-text creation
+CHANGED_FIELD: base_url changed to the active Codex provider; protocol, models, and API key preserved
+
+MODIFIED_FILE: C:\WorkSpace\xiaohongshu\XHS-Downloader\Volume\ai_config.json
+DIFF_FILE: C:\WorkSpace\xiaohongshu\XHS-Downloader\CODEX_AI_RELAY.diff
+VERIFICATION_FILE: C:\WorkSpace\xiaohongshu\XHS-Downloader\CODEX_AI_RELAY_VERIFICATION.txt
+ROLLBACK_FILE: C:\WorkSpace\xiaohongshu\XHS-Downloader\CODEX_AI_RELAY_ROLLBACK.sh
+
+ORIGINAL_COPY: C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\codex-ai-relay-ai_config.json.original
+ORIGINAL_SHA256: D38A63D68A383B74B934D575FF391704368A2DF44705F1E6A17187BCBE9719F6
+MODIFIED_SHA256: E17ADAE3FEEE9BE447732B990F7A69251424EE7EC8C5F2835E019777B7AFB0EA
+SECRET_HANDLING: API key plaintext is omitted; equality was verified by SHA-256 comparison in memory.
+
+BASELINE
+--------
+COMMAND: .\XHS-Downloader\.venv\Scripts\python.exe -
+INPUT: comparison script reading C:\Users\Lin\.codex\config.toml, C:\Users\Lin\.codex\.env, and Volume\ai_config.json without printing the API key
+LITERAL_OUTPUT: base_url_matches=false / api_key_matches=true / project_base_url=http://163.7.10.75/v1 / Codex base_url=http://127.0.0.1:8088/v1
+EXIT_STATUS: 0
+RESULT: reproduced the configuration mismatch while confirming that the project already used the Codex API key.
+
+COMMAND: .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+INPUT: baseline repository test suite
+LITERAL_OUTPUT: Ran 10 tests in 26.848s / OK
+EXIT_STATUS: 0
+RESULT: all existing tests passed before the configuration update.
+
+MODIFIED
+--------
+COMMAND: Invoke-RestMethod -Method Put -Uri http://127.0.0.1:5557/api/ai/config
+INPUT: authenticated admin session; base_url=http://127.0.0.1:8088/v1, protocol=responses, model=gpt-5.6-sol, image_model=gpt-image-2, api_key omitted to preserve the stored value
+LITERAL_OUTPUT: {"ok":true,"base_url":"http://127.0.0.1:8088/v1","protocol":"responses","model":"gpt-5.6-sol","image_model":"gpt-image-2","api_key_configured":true,"configured":true,"image_configured":true}
+EXIT_STATUS: 0
+RESULT: the running web application accepted and persisted the Codex relay configuration.
+
+COMMAND: .\XHS-Downloader\.venv\Scripts\python.exe -
+INPUT: post-update comparison script; API keys compared in memory only
+LITERAL_OUTPUT: API_KEY_MATCHES_CODEX=True / BASE_URL_MATCHES_CODEX=True / PROTOCOL_MATCHES_CODEX=True
+EXIT_STATUS: 0
+RESULT: Base URL, API key, and Responses protocol match the active Codex provider.
+
+COMMAND: Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5557/api/ai/test
+INPUT: authenticated admin session with the modified relay configuration
+LITERAL_OUTPUT: {"ok":true,"latency_ms":700,"models_count":13,"model_available":true,"image_model_available":true}
+EXIT_STATUS: 0
+RESULT: the local relay exposed both configured models.
+
+COMMAND: Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5557/api/ai/generate
+INPUT: image-text creation request using a short non-sensitive test prompt, generate_image=true, image_quality=low
+LITERAL_OUTPUT: {"text_model":"gpt-5.6-sol","text_present":true,"image_model":"gpt-image-2","generated_images_count":1,"image_size":798948,"image_error":null}
+EXIT_STATUS: 0
+RESULT: text and image generation both completed through the local relay; generated PNG verification returned IMAGE_DIMENSIONS=1254x1254 / IMAGE_VERIFY=OK.
+
+COMMAND: .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+INPUT: modified repository test suite
+LITERAL_OUTPUT: Ran 10 tests in 27.016s / OK
+EXIT_STATUS: 0
+RESULT: all existing tests passed after the configuration update.
+
+ROLLBACK
+--------
+COMMAND: "C:\Program Files\Git\bin\bash.exe" CODEX_AI_RELAY_ROLLBACK.sh <backup> <target>
+INPUT: isolated copy C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\codex-ai-relay-rollback-test-20260908132026
+LITERAL_OUTPUT: Restored AI relay configuration: previous Base URL, protocol, models, and API key are active
+EXIT_STATUS: 0
+RESULT: ROLLBACK_HASH_MATCH=True / ROLLBACK_BASE_URL=http://163.7.10.75/v1 / ROLLBACK_EXECUTABLE_CHECK_EXIT=0
+RESTORED_BEHAVIOR: the isolated copy returned to the previous relay configuration and original SHA-256; the working MODIFIED_FILE remains configured for the Codex local relay.

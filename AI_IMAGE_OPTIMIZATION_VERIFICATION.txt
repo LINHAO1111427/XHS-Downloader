@@ -1,0 +1,79 @@
+AI IMAGE OPTIMIZATION VERIFICATION
+==================================
+
+CHANGED_BRANCH: web_app.py /api/ai/generate reference-image preparation
+CHANGED_FIELD: oversized reference images are EXIF-corrected, resized, and JPEG-compressed in memory before relay submission
+
+MODIFIED_FILE: C:\WorkSpace\xiaohongshu\XHS-Downloader\web_app.py
+DIFF_FILE: C:\WorkSpace\xiaohongshu\XHS-Downloader\AI_IMAGE_OPTIMIZATION.diff
+VERIFICATION_FILE: C:\WorkSpace\xiaohongshu\XHS-Downloader\AI_IMAGE_OPTIMIZATION_VERIFICATION.txt
+ROLLBACK_FILE: C:\WorkSpace\xiaohongshu\XHS-Downloader\AI_IMAGE_OPTIMIZATION_ROLLBACK.sh
+
+SUPPORTING_TEST_FILE: C:\WorkSpace\xiaohongshu\XHS-Downloader\tests\test_web_app.py
+ORIGINAL_COPY_DIRECTORY: C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\ai-image-optimize-original
+ORIGINAL_WEB_SHA256: CC2A4F7D3213FCFA87109519B3F6A9E7831840DAE087625C035DE29C0DBD4553
+ORIGINAL_TEST_SHA256: 1370FDACE7197133B6903580855D7F5275FB800F0022AE507E5947D834BA6B90
+MODIFIED_WEB_SHA256: 0BC95D60E61B0E3AE345FAB735CF88A4C31CA06A017E2451AD4FB689757F77DA
+MODIFIED_TEST_SHA256: 7F708D77B8F89221B1A027FDDBD5DBD9352BE8DD6DB81E5CA7A471115FF78898
+
+BASELINE
+--------
+COMMAND: authenticated POST http://127.0.0.1:5557/api/ai/generate
+INPUT: rewrite request with 2026-08-23_22.54.51_宝盖儿_听姐妹们意见！我们这款收纳挂袋再次升级_1.jpeg at 12,968,652 bytes; generate_image=false
+LITERAL_OUTPUT: HTTP_STATUS=413 / {"detail":"图片超过 8 MB：2026-08-23_22.54.51_宝盖儿_听姐妹们意见！我们这款收纳挂袋再次升级_1.jpeg"}
+EXIT_STATUS: 0
+RESULT: reproduced the original pre-relay 8 MB rejection.
+
+COMMAND: .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+INPUT: original web_app.py and original tests/test_web_app.py
+LITERAL_OUTPUT: Ran 10 tests in 22.756s / OK
+EXIT_STATUS: 0
+RESULT: all baseline tests passed before the image handling change.
+
+MODIFIED
+--------
+COMMAND: .\.venv\Scripts\python.exe -m py_compile web_app.py tests\test_web_app.py
+INPUT: modified implementation and regression test
+LITERAL_OUTPUT: PY_COMPILE_EXIT=0
+EXIT_STATUS: 0
+RESULT: Python syntax validation passed.
+
+COMMAND: git diff --check -- web_app.py tests/test_web_app.py
+INPUT: modified implementation and regression test
+LITERAL_OUTPUT: DIFF_CHECK_EXIT=0
+EXIT_STATUS: 0
+RESULT: the patch contains no whitespace errors.
+
+COMMAND: @'<authenticated Chrome CDP four-image fetch script>'@ | node -
+INPUT: all four real 10.97-12.97 MB JPEG library paths; mode=rewrite; generate_image=false; current admin browser session; relay=http://127.0.0.1:8088/v1; protocol=responses; model=gpt-5.6-sol
+LITERAL_OUTPUT: {"selected":4,"status":200,"elapsed_ms":26992,"images_used":4,"image_optimization":{"optimized_count":4,"original_bytes":48420591,"prepared_bytes":2726955,"saved_bytes":45693636},"model":"gpt-5.6-sol","text_length":237,"detail":null}
+EXIT_STATUS: 0
+RESULT: all four previously rejected images were optimized and sent successfully through the configured local relay.
+
+COMMAND: .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+INPUT: modified repository test suite, including large noisy PNG compression regression coverage
+LITERAL_OUTPUT: Ran 10 tests in 26.762s / OK
+EXIT_STATUS: 0
+RESULT: all modified tests passed.
+
+ROLLBACK
+--------
+COMMAND: "C:\Program Files\Git\bin\bash.exe" AI_IMAGE_OPTIMIZATION_ROLLBACK.sh C:\WorkSpace\xiaohongshu\XHS-Downloader\.install\ai-image-optimize-rollback-test-20260908141500
+INPUT: isolated copy containing the modified hashes and preserved originals
+LITERAL_OUTPUT: Restored AI image handling: images larger than 8 MB are rejected before relay submission
+EXIT_STATUS: 0
+RESULT: web_app.py restored to CC2A4F7D3213FCFA87109519B3F6A9E7831840DAE087625C035DE29C0DBD4553; tests/test_web_app.py restored to 1370FDACE7197133B6903580855D7F5275FB800F0022AE507E5947D834BA6B90; content diff exit 0.
+
+COMMAND: @'<isolated TestClient oversized JPEG probe>'@ | C:\WorkSpace\xiaohongshu\XHS-Downloader\.venv\Scripts\python.exe -
+INPUT: rollback copy with oversized.jpeg at 8,388,609 bytes and an authenticated admin session
+LITERAL_OUTPUT: HTTP_STATUS=413 / BODY={"detail":"图片超过 8 MB：oversized.jpeg"}
+EXIT_STATUS: 0
+RESULT: the rollback copy restored the former pre-relay rejection behavior.
+
+COMMAND: C:\WorkSpace\xiaohongshu\XHS-Downloader\.venv\Scripts\python.exe -m unittest discover -s tests -v
+INPUT: complete test suite in the rollback copy
+LITERAL_OUTPUT: Ran 10 tests in 27.920s / OK
+EXIT_STATUS: 0
+RESULT: all baseline tests passed after rollback.
+
+RESTORED_BEHAVIOR: the isolated copy rejects reference images larger than 8 MB with HTTP 413 before contacting the relay; the working MODIFIED_FILE remains optimized and the live app remains on the modified behavior.

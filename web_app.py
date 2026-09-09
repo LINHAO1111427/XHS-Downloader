@@ -6,6 +6,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 from hmac import compare_digest
+from io import BytesIO
 from mimetypes import guess_type
 from pathlib import Path
 from secrets import token_hex
@@ -18,6 +19,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
@@ -33,6 +35,8 @@ from auth import (
     LoginThrottle,
     RegistrationClosed,
 )
+from live_photo import LivePhotoManager, SUPPORTED_LIVE_PHOTO_SUFFIXES
+from alibaba1688 import Alibaba1688Collector
 from media_enhancer import EnhancementManager, SUPPORTED_MEDIA_SUFFIXES
 from source.GUI.backend import GuiBackend
 from source.module import PROJECT, ROOT
@@ -61,8 +65,11 @@ AI_IMAGE_TYPES = {
     ".png": "image/png",
     ".webp": "image/webp",
 }
-MAX_AI_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_AI_IMAGE_SOURCE_BYTES = 64 * 1024 * 1024
+MAX_AI_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_AI_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024
+MAX_AI_IMAGE_EDGE = 2048
+AI_IMAGE_JPEG_QUALITIES = (88, 76, 64, 52)
 SESSION_COOKIE = "xhs_session"
 
 
@@ -152,6 +159,12 @@ class EnhancementRequest(BaseModel):
     paths: Annotated[list[str], Field(min_length=1, max_length=50)]
 
 
+class LivePhotoRequest(BaseModel):
+    path: Annotated[str, Field(min_length=1, max_length=2_048)]
+    start: Annotated[float, Field(ge=0, le=86_400)] = 0
+    duration: Annotated[float, Field(ge=0.5, le=5)] = 3
+
+
 class AIConfigRequest(BaseModel):
     base_url: Annotated[str, Field(max_length=2_048)] = ""
     api_key: Annotated[str, Field(max_length=32_000)] = ""
@@ -199,6 +212,12 @@ class RegistrationSettingRequest(BaseModel):
     enabled: bool
 
 
+class AlibabaCollectRequest(BaseModel):
+    urls: Annotated[list[str], Field(max_length=100)] = Field(default_factory=list)
+    keyword: Annotated[str, Field(max_length=200)] = ""
+    limit: Annotated[int, Field(ge=1, le=200)] = 50
+
+
 def _resolve_file(root: Path, relative_path: str) -> Path:
     root = root.resolve()
     target = (root / relative_path).resolve()
@@ -209,6 +228,73 @@ def _resolve_file(root: Path, relative_path: str) -> Path:
     if not target.is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
     return target
+
+
+def _prepare_ai_image(
+    path: Path,
+    mime_type: str,
+) -> tuple[str, bytes, dict | None]:
+    source_bytes = path.stat().st_size
+    if source_bytes <= MAX_AI_IMAGE_BYTES:
+        return mime_type, path.read_bytes(), None
+    if source_bytes > MAX_AI_IMAGE_SOURCE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"图片超过 64 MB，无法自动优化：{path.name}",
+        )
+
+    try:
+        with Image.open(path) as source:
+            source.load()
+            image = ImageOps.exif_transpose(source)
+            if "A" in image.getbands() or (
+                image.mode == "P" and "transparency" in image.info
+            ):
+                rgba = image.convert("RGBA")
+                rgb = Image.new("RGB", rgba.size, "white")
+                rgb.paste(rgba, mask=rgba.getchannel("A"))
+            else:
+                rgb = image.convert("RGB")
+
+            for edge in (MAX_AI_IMAGE_EDGE, 1600, 1280, 1024):
+                prepared = rgb.copy()
+                prepared.thumbnail(
+                    (edge, edge),
+                    Image.Resampling.LANCZOS,
+                    reducing_gap=2.0,
+                )
+                for quality in AI_IMAGE_JPEG_QUALITIES:
+                    buffer = BytesIO()
+                    prepared.save(
+                        buffer,
+                        format="JPEG",
+                        quality=quality,
+                        optimize=True,
+                        progressive=True,
+                    )
+                    data = buffer.getvalue()
+                    if len(data) <= MAX_AI_IMAGE_BYTES:
+                        return (
+                            "image/jpeg",
+                            data,
+                            {
+                                "path": path.name,
+                                "original_bytes": source_bytes,
+                                "optimized_bytes": len(data),
+                                "width": prepared.width,
+                                "height": prepared.height,
+                            },
+                        )
+    except (Image.DecompressionBombError, UnidentifiedImageError, OSError) as error:
+        raise HTTPException(
+            status_code=422,
+            detail=f"图片无法自动优化：{path.name}",
+        ) from error
+
+    raise HTTPException(
+        status_code=413,
+        detail=f"图片优化后仍超过 4 MB：{path.name}",
+    )
 
 
 def _generated_image_suffix(data: bytes) -> str:
@@ -262,7 +348,11 @@ def _library(runtime: Runtime, limit: int) -> dict:
                 ),
                 "media_kind": media_kind,
                 "is_live": media_kind == "video"
-                and (path.parent, path.stem) in image_stems,
+                and (
+                    (path.parent, path.stem) in image_stems
+                    or "_live" in path.stem
+                ),
+                "live_convertible": suffix in SUPPORTED_LIVE_PHOTO_SUFFIXES,
                 "ai_compatible": suffix in AI_IMAGE_TYPES,
                 "enhanceable": path.suffix.lower() in SUPPORTED_MEDIA_SUFFIXES,
                 "enhanced": "_enhanced_2x" in path.stem,
@@ -275,12 +365,14 @@ def create_app(
     runtime: Runtime | None = None,
     web_root: Path | None = None,
     enhancer: EnhancementManager | None = None,
+    live_photo_manager: LivePhotoManager | None = None,
     ai_gateway: AIGateway | None = None,
     auth_store: AuthStore | None = None,
     login_throttle: LoginThrottle | None = None,
 ) -> FastAPI:
     active_runtime = runtime or DownloaderRuntime()
     active_enhancer = enhancer or EnhancementManager()
+    active_live_photo_manager = live_photo_manager or LivePhotoManager()
     active_ai_gateway = ai_gateway or AIGateway(
         AIConfigStore(
             Path(
@@ -312,6 +404,7 @@ def create_app(
         finally:
             await asyncio.to_thread(active_runtime.stop)
             active_enhancer.shutdown()
+            active_live_photo_manager.shutdown()
 
     app = FastAPI(
         title=f"{PROJECT} Web",
@@ -322,8 +415,13 @@ def create_app(
     )
     app.state.runtime = active_runtime
     app.state.enhancer = active_enhancer
+    app.state.live_photo_manager = active_live_photo_manager
     app.state.ai_gateway = active_ai_gateway
     app.state.auth_store = active_auth
+    active_1688 = Alibaba1688Collector(
+        Path(os.getenv("XHS_1688_STORE_PATH", str(ROOT / "Volume" / "1688" / "products.json")))
+    )
+    app.state.alibaba1688 = active_1688
     app.mount("/assets", StaticFiles(directory=assets), name="assets")
 
     @app.middleware("http")
@@ -411,6 +509,7 @@ def create_app(
             "version": PROJECT,
             "source_media": "original_cdn",
             "enhancement": "lanczos_2x",
+            "live_photo": "ffmpeg_h264_clip",
             "ai_gateway": "openai_compatible",
             "ai_configured": active_ai_gateway.public_config()["configured"],
             "ai_image_configured": active_ai_gateway.public_config()[
@@ -613,6 +712,43 @@ def create_app(
     ) -> dict:
         return _library(active_runtime, limit)
 
+    @app.get("/api/1688/products")
+    def alibaba_products(_user: dict = Depends(require_user)) -> dict:
+        return {"products": active_1688.items(), "total": len(active_1688.items())}
+
+    @app.post("/api/1688/collect", status_code=202)
+    def collect_alibaba_products(
+        payload: AlibabaCollectRequest,
+        _user: dict = Depends(require_csrf),
+    ) -> dict:
+        try:
+            products = active_1688.collect(payload.urls, payload.keyword, payload.limit)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(status_code=502, detail=f"1688 页面采集失败：{error}") from error
+        return {"products": products, "total": len(products)}
+
+    @app.get("/api/1688/export.csv")
+    def export_alibaba_products(_user: dict = Depends(require_user)) -> Response:
+        return Response(
+            content=active_1688.csv_bytes(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="1688-products.csv"'},
+        )
+
+    @app.get("/api/1688/assets/{relative_path:path}")
+    def alibaba_asset(relative_path: str, _user: dict = Depends(require_user)) -> FileResponse:
+        root = active_1688.store_path.parent.resolve()
+        target = (root / relative_path).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="资源不存在") from error
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="资源不存在")
+        return FileResponse(target)
+
     @app.get("/api/ai/config")
     def ai_config(user: dict = Depends(require_user)) -> dict:
         config = active_ai_gateway.public_config()
@@ -669,6 +805,7 @@ def create_app(
             _resolve_file(root, value) for value in dict.fromkeys(request.image_paths)
         ]
         images: list[tuple[str, bytes]] = []
+        optimized_images: list[dict] = []
         total_bytes = 0
         for path in selected:
             mime_type = AI_IMAGE_TYPES.get(path.suffix.lower())
@@ -677,16 +814,16 @@ def create_app(
                     status_code=422,
                     detail=f"图片格式不支持 AI 识别：{path.name}",
                 )
-            size = path.stat().st_size
-            if size > MAX_AI_IMAGE_BYTES:
+            prepared_type, data, optimization = _prepare_ai_image(path, mime_type)
+            total_bytes += len(data)
+            if total_bytes > MAX_AI_IMAGE_TOTAL_BYTES:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"图片超过 8 MB：{path.name}",
+                    detail="图片自动优化后总大小仍超过 20 MB",
                 )
-            total_bytes += size
-            if total_bytes > MAX_AI_IMAGE_TOTAL_BYTES:
-                raise HTTPException(status_code=413, detail="图片总大小超过 20 MB")
-            images.append((mime_type, path.read_bytes()))
+            images.append((prepared_type, data))
+            if optimization:
+                optimized_images.append(optimization)
         if not request.source_text.strip() and not images:
             raise HTTPException(status_code=422, detail="请输入内容或选择参考图片")
         try:
@@ -700,6 +837,17 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(error)) from error
         except AIGatewayConnectionError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
+        result["image_optimization"] = {
+            "optimized_count": len(optimized_images),
+            "original_bytes": sum(
+                item["original_bytes"] for item in optimized_images
+            ),
+            "prepared_bytes": total_bytes,
+            "saved_bytes": sum(
+                item["original_bytes"] - item["optimized_bytes"]
+                for item in optimized_images
+            ),
+        }
         result["generated_images"] = []
         if not request.generate_image:
             return result
@@ -767,6 +915,31 @@ def create_app(
                 detail=f"这些文件不支持清晰增强：{', '.join(unsupported)}",
             )
         return {"task": active_enhancer.submit(root, selected)}
+
+    @app.get("/api/live-photos")
+    def live_photos(_user: dict = Depends(require_user)) -> dict:
+        return {"tasks": active_live_photo_manager.snapshot()}
+
+    @app.post("/api/live-photos", status_code=202)
+    def create_live_photo(
+        request: LivePhotoRequest,
+        _user: dict = Depends(require_csrf),
+    ) -> dict:
+        root = active_runtime.download_root()
+        source = _resolve_file(root, request.path)
+        if source.suffix.lower() not in SUPPORTED_LIVE_PHOTO_SUFFIXES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"这个文件不支持生成实况图：{source.name}",
+            )
+        return {
+            "task": active_live_photo_manager.submit(
+                root,
+                source,
+                request.start,
+                request.duration,
+            )
+        }
 
     @app.get("/files/{relative_path:path}", name="download_file")
     def download_file(

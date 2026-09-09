@@ -9,13 +9,15 @@ from pathlib import Path
 from threading import Thread
 from zipfile import ZipFile
 
+import imageio_ffmpeg
 from fastapi.testclient import TestClient
 from PIL import Image
 
 from ai_gateway import AIConfigStore, AIGateway
 from auth import AuthStore, LoginThrottle
+from live_photo import create_live_video
 from media_enhancer import enhance_media
-from web_app import create_app
+from web_app import MAX_AI_IMAGE_BYTES, MAX_AI_IMAGE_EDGE, create_app
 
 
 class FakeRuntime:
@@ -378,6 +380,62 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(task["outputs"], ["note/photo_enhanced_2x.png"])
         self.assertTrue((self.download_root / task["outputs"][0]).is_file())
 
+    def test_live_photo_converts_image_and_trims_video(self):
+        source = self.download_root / "note" / "photo.png"
+        source.parent.mkdir()
+        Image.new("RGB", (65, 47), "#c92c42").save(source)
+        original = source.read_bytes()
+
+        image_output = create_live_video(source, duration=0.6)
+        self.assertEqual(image_output.name, "photo_live.mp4")
+        self.assertEqual(source.read_bytes(), original)
+        reader = imageio_ffmpeg.read_frames(str(image_output), pix_fmt="rgb24")
+        metadata = next(reader)
+        reader.close()
+        self.assertGreaterEqual(metadata["duration"], 0.5)
+        self.assertTrue(all(value % 2 == 0 for value in metadata["size"]))
+
+        trimmed = create_live_video(image_output, start=0.1, duration=0.5)
+        self.assertEqual(trimmed.name, "photo_live_live.mp4")
+        reader = imageio_ffmpeg.read_frames(str(trimmed), pix_fmt="rgb24")
+        trimmed_metadata = next(reader)
+        reader.close()
+        self.assertGreaterEqual(trimmed_metadata["duration"], 0.4)
+        self.assertLessEqual(trimmed_metadata["duration"], 0.7)
+
+        created = self.client.post(
+            "/api/live-photos",
+            json={"path": "note/photo.png", "start": 0, "duration": 0.5},
+        )
+        self.assertEqual(created.status_code, 202)
+        self.assertEqual(created.json()["task"]["source_kind"], "image")
+        for _ in range(300):
+            task = self.client.get("/api/live-photos").json()["tasks"][0]
+            if task["state"] not in {"pending", "processing"}:
+                break
+            time.sleep(0.01)
+        self.assertEqual(task["state"], "success")
+        self.assertTrue((self.download_root / task["output"]).is_file())
+
+        library = self.client.get("/api/library").json()["items"]
+        generated = next(item for item in library if item["path"] == task["output"])
+        self.assertEqual(generated["media_kind"], "video")
+        self.assertTrue(generated["is_live"])
+        self.assertTrue(generated["live_convertible"])
+
+        unsupported = self.download_root / "note" / "caption.md"
+        unsupported.write_text("caption", encoding="utf-8")
+        rejected = self.client.post(
+            "/api/live-photos",
+            json={"path": "note/caption.md", "duration": 3},
+        )
+        self.assertEqual(rejected.status_code, 422)
+        invalid_duration = self.client.post(
+            "/api/live-photos",
+            json={"path": "note/photo.png", "duration": 8},
+        )
+        self.assertEqual(invalid_duration.status_code, 422)
+
     def test_ai_gateway_config_is_private_and_connection_is_tested(self):
         generated_buffer = BytesIO()
         Image.new("RGB", (6, 4), "#e32640").save(generated_buffer, format="PNG")
@@ -527,6 +585,34 @@ class WebAppTests(unittest.TestCase):
                 content[1]["image_url"].startswith("data:image/png;base64,")
             )
             self.assertEqual(generated.json()["generated_images"], [])
+
+            large_image = self.download_root / "note" / "large-reference.png"
+            Image.effect_noise((2600, 2600), 100).convert("RGB").save(
+                large_image,
+                format="PNG",
+                compress_level=0,
+            )
+            self.assertGreater(large_image.stat().st_size, MAX_AI_IMAGE_BYTES)
+            optimized = self.client.post(
+                "/api/ai/generate",
+                json={
+                    "mode": "rewrite",
+                    "source_text": "大图自动优化测试",
+                    "image_paths": ["note/large-reference.png"],
+                },
+            )
+            self.assertEqual(optimized.status_code, 200)
+            optimization = optimized.json()["image_optimization"]
+            self.assertEqual(optimization["optimized_count"], 1)
+            self.assertGreater(optimization["saved_bytes"], 0)
+            optimized_url = ModelsHandler.last_payload["input"][0]["content"][1][
+                "image_url"
+            ]
+            self.assertTrue(optimized_url.startswith("data:image/jpeg;base64,"))
+            optimized_data = base64.b64decode(optimized_url.split(",", 1)[1])
+            self.assertLessEqual(len(optimized_data), MAX_AI_IMAGE_BYTES)
+            with Image.open(BytesIO(optimized_data)) as prepared:
+                self.assertLessEqual(max(prepared.size), MAX_AI_IMAGE_EDGE)
 
             created = self.client.post(
                 "/api/ai/generate",

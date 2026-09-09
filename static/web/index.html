@@ -100,7 +100,7 @@
                 <div class="ai-image-result" id="aiImageResult" hidden>
                     <div class="generated-image-heading"><span>生成图片</span><span id="generatedImageMeta"></span></div>
                     <button class="generated-image-preview" id="generatedImagePreviewButton" type="button" title="放大查看生成图片"><img id="generatedImagePreview" alt="AI 生成图片"></button>
-                    <a class="button secondary generated-image-download" id="generatedImageDownload" href="#" download><i data-lucide="download"></i>下载图片</a>
+                    <div class="generated-image-actions"><button class="button live-photo" id="generatedImageLivePhoto" type="button" disabled><i data-lucide="clapperboard"></i>生成实况</button><a class="button secondary generated-image-download" id="generatedImageDownload" href="#" download><i data-lucide="download"></i>下载图片</a></div>
                 </div>
             </div>
         </div>
@@ -116,12 +116,27 @@
         </div>
     </section>
 
+    <section class="content-section alibaba-section" aria-labelledby="alibabaTitle">
+        <div class="section-heading">
+            <div><h2 id="alibabaTitle">1688 商品采集</h2><p id="alibabaSummary">粘贴公开商品链接，或按关键词打开搜索采集</p></div>
+            <a class="button secondary" id="alibabaExport" href="/api/1688/export.csv"><i data-lucide="sheet"></i>导出 CSV</a>
+        </div>
+        <div class="alibaba-inputs">
+            <label class="url-field" for="alibabaUrls"><span>商品链接或分享文案（每行一个）</span><textarea id="alibabaUrls" rows="3" placeholder="可直接粘贴手机阿里分享文案、qr.1688.com 短链或商品详情链接"></textarea></label>
+            <label class="text-field" for="alibabaKeyword"><span>搜索关键词（可选）</span><input id="alibabaKeyword" type="text" maxlength="200" placeholder="例如：女装 连衣裙"></label>
+            <button class="button primary" id="alibabaCollect" type="button"><i data-lucide="package-search"></i>开始采集</button>
+        </div>
+        <div class="alibaba-grid" id="alibabaProducts"><div class="empty-state"><i data-lucide="package-open"></i><span>暂无商品</span></div></div>
+        <p class="collector-note">仅采集公开页面信息，不绕过登录、验证码或平台风控；请遵守 1688 平台规则和适用法律。</p>
+    </section>
+
     <section class="content-section library-section" aria-labelledby="libraryTitle">
         <div class="section-heading library-heading">
             <div><h2 id="libraryTitle">已下载文件</h2><p id="librarySummary">正在读取</p></div>
             <div class="library-actions">
                 <label class="search-field"><i data-lucide="search"></i><input id="fileSearch" type="search" placeholder="搜索文件"></label>
                 <button class="button enhance" id="enhanceButton" type="button" disabled title="生成 2 倍清晰增强副本"><i data-lucide="wand-sparkles"></i>清晰增强 2x</button>
+                <button class="button live-photo" id="livePhotoButton" type="button" disabled title="将一张图片或一段视频生成实况素材"><i data-lucide="clapperboard"></i>生成实况</button>
                 <button class="button secondary" id="archiveButton" type="button" disabled><i data-lucide="archive"></i>打包下载</button>
                 <button class="icon-button subtle" id="refreshLibraryButton" type="button" title="刷新文件" aria-label="刷新文件"><i data-lucide="refresh-cw"></i></button>
             </div>
@@ -129,6 +144,10 @@
         <div class="enhancement-strip" id="enhancementPanel" hidden aria-live="polite">
             <div class="enhancement-copy"><i data-lucide="sparkles"></i><div><strong id="enhancementTitle">清晰增强</strong><span id="enhancementDetail"></span></div></div>
             <div class="enhancement-progress"><div class="progress-track"><div class="progress-bar" id="enhancementProgress"></div></div><span class="state-pill" id="enhancementState"></span></div>
+        </div>
+        <div class="enhancement-strip live-photo-strip" id="livePhotoPanel" hidden aria-live="polite">
+            <div class="enhancement-copy"><i data-lucide="clapperboard"></i><div><strong id="livePhotoTitle">实况素材</strong><span id="livePhotoDetail"></span></div></div>
+            <span class="state-pill" id="livePhotoState"></span>
         </div>
         <div class="file-table-wrap">
             <table class="file-table">
@@ -187,6 +206,21 @@
             <label class="text-field" for="aiImageModel"><span>图片模型</span><input id="aiImageModel" type="text" placeholder="例如 gpt-image-2" autocomplete="off"></label>
         </div>
         <div class="dialog-actions"><button class="button secondary" id="testAIButton" type="button"><i data-lucide="activity"></i>测试连接</button><button class="button primary" id="saveAIButton" type="submit"><i data-lucide="save"></i>保存配置</button></div>
+    </form>
+</dialog>
+
+<dialog id="livePhotoDialog" class="live-photo-dialog">
+    <form class="dialog-shell" id="livePhotoForm">
+        <div class="dialog-heading"><div><h2>生成实况素材</h2><p id="livePhotoMeta"></p></div><button class="icon-button subtle dialog-close" type="button" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="live-photo-editor">
+            <div class="live-photo-preview"><img id="livePhotoImage" alt="" hidden><video id="livePhotoVideo" controls muted playsinline hidden></video></div>
+            <div class="live-photo-controls">
+                <label class="range-field" id="liveStartField" for="liveStartRange"><span>起始时间 <output id="liveStartValue">0.0 秒</output></span><input id="liveStartRange" type="range" min="0" max="0" step="0.1" value="0"></label>
+                <label class="range-field" for="liveDurationRange"><span>实况时长 <output id="liveDurationValue">3.0 秒</output></span><input id="liveDurationRange" type="range" min="0.5" max="5" step="0.1" value="3"></label>
+                <div class="live-photo-format"><span>输出</span><strong>MP4 · H.264 · 最长边 1920px</strong></div>
+            </div>
+        </div>
+        <div class="dialog-actions"><button class="button secondary dialog-close" type="button">取消</button><button class="button primary" id="createLivePhotoButton" type="submit"><i data-lucide="clapperboard"></i>开始生成</button></div>
     </form>
 </dialog>
 
