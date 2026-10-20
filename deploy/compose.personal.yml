@@ -1,0 +1,47 @@
+name: xhs-personal
+services:
+  app:
+    image: xhs-personal:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    init: true
+    restart: unless-stopped
+    command: [uvicorn, "personal_app:create_personal_app", --factory, --host, "0.0.0.0", --port, "8000", --workers, "1", --no-proxy-headers, --timeout-graceful-shutdown, "330"]
+    environment:
+      XHS_SERVER_DATA_ROOT: /data
+      XHS_DOCKER_MODE: "1"
+      XHS_BROWSER_HEADLESS: "1"
+      XHS_WEB_SECURE_COOKIE: "0"
+      XHS_ALLOWED_HOSTS: "localhost,127.0.0.1"
+      TZ: Asia/Shanghai
+      TMPDIR: /data/Temp
+      HOME: /data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:5557:8000"
+    volumes:
+      - type: bind
+        source: ../DockerData
+        target: /data
+        bind:
+          create_host_path: false
+    shm_size: 1gb
+    mem_limit: 6g
+    cpus: 3
+    pids_limit: 1024
+    stop_grace_period: 6m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready',timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

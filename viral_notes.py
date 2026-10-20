@@ -22,6 +22,7 @@ from curl_cffi.requests import Session
 from curl_cffi.requests.exceptions import RequestException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from xhshow import Xhshow
+from source.application.product import extract_products
 
 CST = timezone(timedelta(hours=8))
 ACTIVE_STATES = {"pending", "processing"}
@@ -91,9 +92,21 @@ def pick(data: dict, *keys):
 
 
 def follower_count(data: dict) -> int | None:
-    for item in data.get("interactions", []):
-        if isinstance(item, dict) and item.get("type") in {"fans", "followers"}:
-            return parse_count(item.get("count"))
+    interactions = pick(data, "interactions", "interactionInfo", "interaction_info") or []
+    for item in interactions if isinstance(interactions, list) else []:
+        if (
+            isinstance(item, dict)
+            and str(item.get("type") or "").lower() in {"fans", "followers", "fanscount", "followerscount"}
+        ):
+            count = parse_count(pick(item, "count", "value", "fansCount", "followersCount"))
+            if count is not None:
+                return count
+    for container in (data, pick(data, "basic_info", "basicInfo") or {}):
+        if not isinstance(container, dict):
+            continue
+        for key in ("fans", "fans_count", "fansCount", "followers", "followers_count", "followersCount"):
+            if key in container and (count := parse_count(container.get(key))) is not None:
+                return count
     return None
 
 
@@ -111,6 +124,30 @@ def normalize_note(data: dict, token: str) -> dict:
     except (TypeError, ValueError):
         published = None
     images = pick(data, "image_list", "imageList") or []
+    if isinstance(images, dict):
+        images = [images]
+    elif not isinstance(images, list):
+        images = []
+    raw_type = pick(data, "type", "note_type", "noteType")
+    video_value = pick(data, "video", "video_info", "videoInfo", "video_url", "videoUrl")
+    raw_type_text = str(raw_type or "").casefold()
+    video_text = str(video_value or "").strip().casefold()
+    has_video = (
+        (bool(video_value) and video_text not in {"0", "false", "none", "null"})
+        or "video" in raw_type_text
+        or "视频" in raw_type_text
+    )
+    # MCP payloads are not consistent across versions: some return ``type``,
+    # while others only expose image/video containers.  Keep the raw value and
+    # add a normalized marker so the image-text selector can make a decision.
+    if has_video:
+        note_type = "video"
+    elif images:
+        note_type = "image_text"
+    elif raw_type_text in {"normal", "image", "图文", "图文笔记"}:
+        note_type = "image_text"
+    else:
+        note_type = str(raw_type or "")
     cover = pick(images[0], "url_default", "urlDefault", "url") if images else ""
     cover = str(cover or "")
     parts = urlsplit(cover)
@@ -126,7 +163,8 @@ def normalize_note(data: dict, token: str) -> dict:
         + urlencode({"xsec_token": token, "xsec_source": "pc_search"}),
         "title": str(pick(data, "title", "display_title") or ""),
         "description": str(data.get("desc") or ""),
-        "type": str(data.get("type") or ""),
+        "type": str(raw_type or ""),
+        "note_type": note_type,
         "author_id": str(pick(user, "user_id", "userId") or ""),
         "author": str(pick(user, "nickname", "nickName") or ""),
         "published_at": published,
@@ -153,6 +191,39 @@ def publication_start(rules: ViralRules, now: float) -> float:
     return now - rules.hours * 3600
 
 
+def note_matches_keywords(note: dict, keywords: list[str]) -> bool:
+    """Reject obvious search-recommendation noise before author lookups."""
+    product_titles = " ".join(
+        str(product.get("title") or "")
+        for product in note.get("products", [])
+        if isinstance(product, dict)
+    )
+    haystack = " ".join(
+        [
+            note.get("title", ""),
+            note.get("description", ""),
+            *note.get("tags", []),
+            product_titles,
+        ]
+    ).casefold()
+    compact_haystack = re.sub(r"\s+", "", haystack)
+    for keyword in keywords:
+        compact = re.sub(
+            r"[^0-9a-z\u4e00-\u9fff]+", "", keyword.casefold()
+        )
+        if not compact:
+            continue
+        if compact in compact_haystack:
+            return True
+        if len(compact) >= 4 and re.fullmatch(r"[\u4e00-\u9fff]+", compact):
+            pairs = {
+                compact[index:index + 2] for index in range(len(compact) - 1)
+            }
+            if sum(pair in compact_haystack for pair in pairs) >= 2:
+                return True
+    return False
+
+
 def rank_note(
     note: dict, followers: int | None, rules: ViralRules, now: float
 ) -> dict | None:
@@ -162,10 +233,11 @@ def rank_note(
     age = (now - published) / 3600
     if not publication_start(rules, now) <= published <= now:
         return None
-    counts = [note[key] for key in ("likes", "collects", "comments", "shares")]
-    if any(value is None for value in counts):
+    required_counts = [note[key] for key in ("likes", "collects", "comments")]
+    if any(value is None for value in required_counts):
         return None
-    total = sum(counts)
+    shares = note.get("shares")
+    total = sum(required_counts) + (shares if shares is not None else 0)
     ratio = total / max(followers, 1)
     if (
         note["likes"] < rules.min_likes
@@ -182,6 +254,7 @@ def rank_note(
     return note | {
         "followers": followers,
         "interactions": total,
+        "interactions_lower_bound": shares is None,
         "ratio": round(ratio, 4),
         "score": round(score, 2),
     }
@@ -323,6 +396,9 @@ def collect_notes(
         "scanned": 0,
         "candidates": 0,
         "unknown": 0,
+        "unknown_reasons": {"note_fields": 0, "author_id": 0, "followers": 0},
+        "share_hidden": 0,
+        "irrelevant": 0,
         "matched": 0,
         "truncated": False,
         "window_start": publication_start(rules, now),
@@ -383,35 +459,46 @@ def collect_notes(
     for note_id, candidate in candidates.items():
         checkpoint()
         try:
-            if not candidate["token"]:
+            if not candidate["token"] and getattr(client, "requires_token", True):
                 raise PlatformError("搜索结果缺少笔记 xsec_token")
-            note = normalize_note(
-                client.detail(note_id, candidate["token"]), candidate["token"]
-            )
+            detail = client.detail(note_id, candidate["token"])
+            note = normalize_note(detail, candidate["token"])
+            note["products"] = extract_products(detail)
             if note["note_id"] != note_id:
                 raise PlatformError("笔记详情 ID 不匹配")
             published = note["published_at"]
             if published is None or any(
-                note[key] is None for key in ("likes", "collects", "comments", "shares")
+                note[key] is None for key in ("likes", "collects", "comments")
             ):
                 result["unknown"] += 1
+                result["unknown_reasons"]["note_fields"] += 1
                 continue
+            if note["shares"] is None:
+                result["share_hidden"] += 1
             if not result["window_start"] <= published <= now:
                 continue
             if (
+                getattr(client, "enforce_keyword_relevance", False)
+                and not note_matches_keywords(note, candidate["keywords"])
+            ):
+                result["irrelevant"] += 1
+                continue
+            if (
                 note["likes"] < rules.min_likes
-                or sum(note[key] for key in ("likes", "collects", "comments", "shares"))
+                or sum(note[key] or 0 for key in ("likes", "collects", "comments", "shares"))
                 < rules.min_interactions
             ):
                 continue
             author_id = note["author_id"]
             if not NOTE_ID.fullmatch(author_id):
                 result["unknown"] += 1
+                result["unknown_reasons"]["author_id"] += 1
                 continue
             if author_id not in authors:
                 authors[author_id] = follower_count(client.author(author_id))
             if authors[author_id] is None:
                 result["unknown"] += 1
+                result["unknown_reasons"]["followers"] += 1
             if ranked := rank_note(note, authors[author_id], rules, now):
                 result["items"].append(
                     ranked | {"keywords": candidate["keywords"], "collected_at": time()}
@@ -487,6 +574,187 @@ class ViralStore:
             else {**ViralSchedule().model_dump(), "last_date": ""}
         )
 
+    def recommendations(self, now: float | None = None, limit: int = 10) -> dict:
+        """Recommend today's verified snapshots; never present old batches as today's data."""
+        now = time() if now is None else now
+        midnight = datetime.fromtimestamp(now, CST).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        with self.connection() as db:
+            rows = db.execute(
+                "SELECT payload FROM viral_runs WHERE created>=? AND created<=? ORDER BY created DESC LIMIT 500",
+                (midnight - 7 * 86400, now),
+            ).fetchall()
+        runs = [json.loads(row[0]) for row in rows]
+        today = [run for run in runs if run["created_at"] >= midnight]
+        seen_before = {note["note_id"] for run in runs if run["created_at"] < midnight
+                       for note in run.get("items", [])}
+        latest = {}
+        for run in today:
+            if run["state"] not in {"success", "partial"}:
+                continue
+            rules = ViralRules.model_validate(run["rules"])
+            for note in run.get("items", []):
+                if note["note_id"] in latest:
+                    continue
+                # Keep the newest observation even when it no longer passes the window.
+                latest[note["note_id"]] = None
+                ranked = rank_note(note, note.get("followers"), rules, now)
+                if ranked is None:
+                    continue
+                first_seen = note["note_id"] not in seen_before
+                interaction_label = "已公开互动至少" if ranked.get("interactions_lower_bound") else "总互动"
+                reasons = [f"粉丝 {ranked['followers']:,}，{interaction_label} {ranked['interactions']:,}",
+                           f"互动/粉丝 {ranked['ratio']:.2f}，收藏 {ranked['collects']:,}"]
+                if first_seen:
+                    reasons.append("近 7 天采集记录中首次发现")
+                latest[note["note_id"]] = ranked | {
+                    "run_id": run["id"], "observed_at": note.get("collected_at", run["created_at"]),
+                    "first_seen": first_seen, "reasons": reasons,
+                    "recommendation_score": round(ranked["score"] * (1.15 if first_seen else 1), 2),
+                    "partial": run["state"] == "partial",
+                }
+        candidates = sorted((item for item in latest.values() if item),
+                            key=lambda item: (-item["recommendation_score"], -item["interactions"], item["note_id"]))
+        chosen, authors = [], {}
+        for item in candidates:
+            author = item.get("author_id") or item["note_id"]
+            if authors.get(author, 0) >= 2:
+                continue
+            chosen.append(item)
+            authors[author] = authors.get(author, 0) + 1
+            if len(chosen) >= limit:
+                break
+        last = today[0] if today else None
+        latest_run = None
+        if last:
+            latest_run = {
+                key: last.get(key)
+                for key in ("id", "state", "message", "created_at")
+            }
+            errors = last.get("errors") or []
+            if last.get("state") == "failed" and errors:
+                latest_run["message"] = f"采集失败：{errors[0].get('message') or '请查看异常记录'}"
+            latest_run["login_required"] = bool(
+                last.get("state") == "failed"
+                and re.search(r"登录|Cookie|code=-100|验证", str(latest_run.get("message") or ""))
+            )
+        return {"date": datetime.fromtimestamp(now, CST).date().isoformat(), "items": chosen,
+                "candidate_count": len(candidates), "batch_count": len(today),
+                "latest_run": latest_run,
+                "method": "今日已完成批次去重；按互动效率与时效排序，新发现加权 15%，同作者最多 2 篇。仅代表已采集样本。"}
+
+    def product_recommendations(
+        self, now: float | None = None, limit: int = 10
+    ) -> dict:
+        """Build a platform-only product feed from products attached to verified notes."""
+        now = time() if now is None else now
+        note_feed = self.recommendations(now, limit=100)
+        with self.connection() as db:
+            rows = db.execute(
+                "SELECT payload FROM viral_runs WHERE created>=? AND created<=? ORDER BY created ASC",
+                (now - 48 * 3600, now),
+            ).fetchall()
+        history: dict[str, list[dict]] = {}
+        for row in rows:
+            run = json.loads(row[0])
+            if run.get("state") not in {"success", "partial"}:
+                continue
+            for note in run.get("items", []):
+                observed = float(note.get("collected_at") or run.get("created_at") or 0)
+                history.setdefault(str(note.get("note_id") or ""), []).append(
+                    {
+                        "observed_at": observed,
+                        "likes": int(note.get("likes") or 0),
+                        "collects": int(note.get("collects") or 0),
+                        "comments": int(note.get("comments") or 0),
+                        "shares": int(note.get("shares") or 0),
+                        "interactions": int(note.get("interactions") or 0),
+                    }
+                )
+
+        grouped: dict[str, dict] = {}
+        for note in note_feed["items"]:
+            products = note.get("products") or []
+            if not isinstance(products, list):
+                continue
+            observed_at = float(note.get("observed_at") or now)
+            earlier = [
+                snapshot
+                for snapshot in history.get(note["note_id"], [])
+                if observed_at - 24 * 3600 <= snapshot["observed_at"] < observed_at
+            ]
+            baseline = min(earlier, key=lambda item: item["observed_at"]) if earlier else None
+            deltas = None
+            if baseline:
+                deltas = {
+                    key: max(0, int(note.get(key) or 0) - baseline[key])
+                    for key in ("likes", "collects", "comments", "shares", "interactions")
+                }
+            for product in products[:20]:
+                if not isinstance(product, dict):
+                    continue
+                title = str(product.get("title") or "").strip()
+                url = str(product.get("url") or "").strip()
+                product_id = str(product.get("product_id") or "").strip()
+                if not title and not url:
+                    continue
+                key = product_id or url or title.casefold()
+                delta_interactions = int((deltas or {}).get("interactions") or 0)
+                score = float(note.get("recommendation_score") or note.get("score") or 0)
+                score += math.log1p(delta_interactions) * 10
+                candidate = {
+                    "key": key,
+                    "product_id": product_id,
+                    "title": title or "小红书挂载商品",
+                    "url": url,
+                    "price": str(product.get("price") or ""),
+                    "shop": str(product.get("shop") or ""),
+                    "images": list(dict.fromkeys(product.get("images") or []))[:6],
+                    "note_id": note["note_id"],
+                    "note_title": note.get("title") or note["note_id"],
+                    "note_url": note["url"],
+                    "author": note.get("author") or "",
+                    "followers": note["followers"],
+                    "likes": note["likes"],
+                    "collects": note["collects"],
+                    "comments": note["comments"],
+                    "shares": note.get("shares"),
+                    "interactions": note["interactions"],
+                    "interactions_lower_bound": bool(note.get("interactions_lower_bound")),
+                    "observed_at": observed_at,
+                    "deltas_24h": deltas,
+                    "supporting_notes": 1,
+                    "score": round(score, 2),
+                }
+                current = grouped.get(key)
+                if current is None:
+                    grouped[key] = candidate
+                else:
+                    supporting = current["supporting_notes"] + 1
+                    if candidate["score"] > current["score"]:
+                        candidate["supporting_notes"] = supporting
+                        grouped[key] = candidate
+                    else:
+                        current["supporting_notes"] = supporting
+        items = sorted(
+            grouped.values(),
+            key=lambda item: (
+                -item["score"],
+                -item["collects"],
+                -item["interactions"],
+                item["key"],
+            ),
+        )[: max(1, min(int(limit), 100))]
+        return {
+            "date": note_feed["date"],
+            "items": items,
+            "source_note_count": len(note_feed["items"]),
+            "latest_run": note_feed["latest_run"],
+            "method": (
+                "仅使用当天小红书平台采集且已通过低粉规则的笔记，并提取笔记真实挂载商品。"
+                "按公开互动效率、收藏和可计算的近 24 小时增量排序；平台未公开加购人数，因此不展示或推算加购。"
+            ),
+        }
+
     def save_config(self, config: dict):
         with self.connection() as db:
             db.execute(
@@ -544,6 +812,30 @@ class ViralService:
             self.store.save_config(config)
         return config
 
+    def schedule_status(self, now: datetime | None = None) -> dict:
+        now = (now or datetime.now(CST)).astimezone(CST)
+        config = self.store.config()
+        next_at = None
+        if config["enabled"]:
+            hour, minute = map(int, config["at"].split(":"))
+            due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if config.get("last_date") == now.date().isoformat():
+                due += timedelta(days=1)
+            next_at = max(due, now).timestamp()
+        readiness = ""
+        try:
+            settings = self.settings()
+            cookies = SimpleCookie()
+            cookies.load(settings.get("cookie") or "")
+            if not all(cookies.get(name) and cookies[name].value for name in ("a1", "web_session")):
+                readiness = "请先保存小红书登录 Cookie，再点击立即采集验证"
+        except ViralError as error:
+            readiness = str(error)
+        except Exception:
+            readiness = "采集配置暂未就绪，请检查后台服务与 Cookie 设置"
+        return {"next_run_at": next_at, "timezone": "Asia/Shanghai", "readiness_message": readiness,
+                "requires_running_service": True, "catch_up": "当天错过时间会在服务启动后补采一次"}
+
     def submit(self, rules: ViralRules, source="manual") -> dict:
         with self.lock:
             if self.stop.is_set() or self.active_id:
@@ -551,12 +843,27 @@ class ViralService:
             # Resolve a private settings snapshot before returning 202; no secrets are persisted.
             settings = self.settings()
             self.cancel_event = Event()
-            client = self.client_factory(settings, self.cancel_event)
+            validator = getattr(self.client_factory, "validate_settings", None)
+            if validator:
+                validator(settings)
+            thread_affine = bool(
+                getattr(self.client_factory, "thread_affine", False)
+            )
+            client = (
+                None
+                if thread_affine
+                else self.client_factory(settings, self.cancel_event)
+            )
             run = {
                 "id": uuid4().hex,
                 "created_at": time(),
                 "finished_at": None,
                 "source": source,
+                "collector": getattr(
+                    self.client_factory,
+                    "mode",
+                    getattr(client, "mode", "api"),
+                ),
                 "state": "pending",
                 "rules": rules.model_dump(),
                 "items": [],
@@ -564,6 +871,7 @@ class ViralService:
                 "scanned": 0,
                 "candidates": 0,
                 "unknown": 0,
+                "irrelevant": 0,
                 "matched": 0,
                 "truncated": False,
                 "message": "等待采集",
@@ -573,14 +881,15 @@ class ViralService:
                 self.active_id = run["id"]
                 self.worker = Thread(
                     target=self._run,
-                    args=(run, rules, client, self.cancel_event),
+                    args=(run, rules, settings, client, self.cancel_event),
                     name="viral-collector",
                     daemon=True,
                 )
                 self.worker.start()
             except Exception:
                 self.active_id = None
-                client.close()
+                if client:
+                    client.close()
                 raise
             return self.store.get_run(run["id"])
 
@@ -590,7 +899,7 @@ class ViralService:
                 raise ViralError("采集任务已结束或不存在")
             self.cancel_event.set()
 
-    def _run(self, run, rules, client, cancel):
+    def _run(self, run, rules, settings, client, cancel):
         def progress(result):
             run.update(result)
             run["items"] = sorted(
@@ -605,6 +914,8 @@ class ViralService:
             self.store.save_run(run)
 
         try:
+            if client is None:
+                client = self.client_factory(settings, cancel)
             run.update(state="processing", message="正在搜索并核验笔记与作者数据")
             self.store.save_run(run)
             result = collect_notes(client, rules, cancel, progress, run["created_at"])
@@ -614,13 +925,21 @@ class ViralService:
             run["state"] = "partial" if run["errors"] or run["unknown"] else "success"
             if result.get("fatal") or (run["errors"] and not run["items"]):
                 run["state"] = "failed"
-            run["message"] = (
-                "采集完成"
-                if run["state"] == "success"
-                else "采集存在缺失，请查看异常记录"
-            )
+            if run["state"] == "success":
+                run["message"] = "低粉爆款筛选完成"
+            elif run["state"] == "failed" and run["errors"]:
+                run["message"] = f"采集失败：{run['errors'][0]['message']}"
+            elif run["state"] == "failed":
+                run["message"] = "采集失败，未取得可核验的低粉笔记"
+            else:
+                run["message"] = "低粉爆款筛选完成，部分字段缺失已排除"
         except CollectionStopped as error:
             run.update(state="cancelled", message=str(error))
+        except PlatformError as error:
+            run["errors"].append(
+                {"stage": "browser", "target": "Edge", "message": str(error)}
+            )
+            run.update(state="failed", message=f"采集失败：{error}")
         except Exception:
             run.update(
                 state="failed",
@@ -628,7 +947,21 @@ class ViralService:
             )
         finally:
             try:
-                client.close()
+                if client:
+                    client.close()
+            except Exception:
+                run["errors"].append(
+                    {
+                        "stage": "browser-close",
+                        "target": "Edge",
+                        "message": "页面采集窗口关闭异常，服务已结束本批任务",
+                    }
+                )
+                if run.get("state") in ACTIVE_STATES:
+                    run.update(
+                        state="failed",
+                        message="页面采集窗口关闭异常，本批任务已结束",
+                    )
             finally:
                 run["finished_at"] = time()
                 run["items"].sort(
@@ -674,6 +1007,7 @@ class ViralService:
                         "scanned": 0,
                         "candidates": 0,
                         "unknown": 0,
+                        "irrelevant": 0,
                         "matched": 0,
                         "truncated": False,
                         "message": str(error),

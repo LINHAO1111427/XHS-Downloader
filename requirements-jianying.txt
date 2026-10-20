@@ -1,0 +1,2 @@
+# Optional local editable-draft export; rendering itself still uses FFmpeg.
+pyJianYingDraft==0.3.0

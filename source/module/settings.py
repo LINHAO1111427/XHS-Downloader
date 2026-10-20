@@ -1,4 +1,5 @@
 from json import dump, load
+from copy import deepcopy
 from pathlib import Path
 from platform import system
 from shutil import move
@@ -80,7 +81,7 @@ class Settings:
         # 创建新的设置文件
         with self.path.open("w", encoding=self.encode) as f:
             dump(self.default, f, indent=4, ensure_ascii=False)
-            return self.default
+            return deepcopy(self.default)
 
     def update(self, data: dict):
         """更新设置文件内容

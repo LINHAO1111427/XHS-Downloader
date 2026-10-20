@@ -6,9 +6,11 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
+from server_limits import limited_media
 from threading import Lock
 from time import time
 from uuid import uuid4
+from task_journal import TaskJournal
 
 try:
     import imageio_ffmpeg
@@ -33,6 +35,9 @@ def list_music(root: Path) -> list[dict]:
     ]
 
 
+
+
+@limited_media
 def create_slideshow(images: list[Path], output: Path, *, seconds: float = 2.5, music: Path | None = None) -> None:
     if not images or len(images) > 30:
         raise SlideshowError("请选择 1 到 30 张图片")
@@ -64,15 +69,28 @@ def create_slideshow(images: list[Path], output: Path, *, seconds: float = 2.5, 
 
 
 class SlideshowManager:
-    def __init__(self, max_workers: int = 1) -> None:
+    def __init__(self, max_workers: int = 1, *, state_path: Path | None = None) -> None:
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="slideshow")
         self._lock = Lock()
-        self._tasks: dict[str, dict] = {}
+        self._journal = TaskJournal(state_path)
+        self._tasks = self._journal.load()
+
+    def recover(self):
+        if self._journal.path is not None:
+            with self._lock:
+                self._tasks = self._journal.recover()
+
+    def _update(self, task_id, **changes):
+        with self._lock:
+            task = {**self._tasks[task_id], **changes}
+            self._journal.save(task)
+            self._tasks[task_id] = task
 
     def submit(self, root: Path, images: list[Path], *, seconds: float, music: Path | None) -> dict:
         task_id = uuid4().hex
         task = {"task_id": task_id, "state": "pending", "created_at": int(time()), "paths": [p.relative_to(root).as_posix() for p in images], "music": music.relative_to(root).as_posix() if music else "", "output": "", "error": ""}
         with self._lock:
+            self._journal.add(task, self._tasks)
             self._tasks[task_id] = task
         self._executor.submit(self._run, task_id, root, images, seconds, music)
         return deepcopy(task)
@@ -85,15 +103,12 @@ class SlideshowManager:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _run(self, task_id: str, root: Path, images: list[Path], seconds: float, music: Path | None) -> None:
-        with self._lock:
-            self._tasks[task_id]["state"] = "processing"
+        self._update(task_id, state="processing")
         try:
             output_dir = root / "图片成片"
             output_dir.mkdir(parents=True, exist_ok=True)
             output = output_dir / f"slideshow_{int(time())}_{task_id[:6]}.mp4"
             create_slideshow(images, output, seconds=seconds, music=music)
-            with self._lock:
-                self._tasks[task_id].update(state="success", output=output.relative_to(root).as_posix(), finished_at=int(time()))
+            self._update(task_id, state="success", output=output.relative_to(root).as_posix(), finished_at=int(time()))
         except Exception as error:
-            with self._lock:
-                self._tasks[task_id].update(state="failed", error=str(error), finished_at=int(time()))
+            self._update(task_id, state="failed", error=str(error), finished_at=int(time()))

@@ -1,32 +1,19 @@
-"""Video remixing and duplicate detection built on FFmpeg.
-
-The project already downloads MP4/MOV/M4V files. This module keeps processing
-local and deterministic: FFmpeg performs a video-only concat with light timing
-variation, while dedupe uses SHA-256 so identical files are never reported as
-different assets.
-"""
+"""FFmpeg product-preserving remix tasks and exact-file duplicate detection."""
 
 from __future__ import annotations
 
 import hashlib
-import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from threading import Lock
 from time import time
 from uuid import uuid4
+from task_journal import TaskJournal
 
-try:
-    import imageio_ffmpeg
-except ImportError:  # pragma: no cover - installation-time dependency
-    imageio_ffmpeg = None
+from video_compositor import RemixRecipe, VideoToolError, render_remix, validate_recipe
 
 VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".m4v"})
-
-
-class VideoToolError(ValueError):
-    pass
 
 
 def _temporary_output(path: Path) -> Path:
@@ -44,42 +31,20 @@ def _next_output(root: Path) -> Path:
     return candidate
 
 
-def remix_videos(sources: list[Path], output: Path, *, speed: float = 1.0) -> None:
-    if not sources:
-        raise VideoToolError("至少选择一个视频")
-    if len(sources) > 20:
-        raise VideoToolError("一次最多混剪 20 个视频")
-    if speed <= 0.5 or speed > 2:
+def remix_videos(sources: list[Path], output: Path, *, speed: float = 1.0,
+                 root: Path | None = None, recipe: RemixRecipe | None = None,
+                 progress=None, dedupe=None) -> None:
+    if not sources or len(sources) > 20:
+        raise VideoToolError("请选择 1 到 20 个视频片段")
+    if not 0.5 <= speed <= 2:
         raise VideoToolError("播放速度必须在 0.5 到 2 倍之间")
-    if imageio_ffmpeg is None:
-        raise VideoToolError("视频混剪需要安装 imageio-ffmpeg")
-    temporary = _temporary_output(output)
-    inputs: list[str] = []
-    filters: list[str] = []
-    for index, source in enumerate(sources):
-        inputs.extend(["-i", str(source)])
-        # Normalize dimensions and timestamps so clips from different devices concatenate.
-        filters.append(
-            f"[{index}:v:0]scale=trunc(min(1080\\,iw)/2)*2:-2:force_original_aspect_ratio=decrease,"
-            f"pad=ceil(iw/2)*2:ceil(ih/2)*2:(ow-iw)/2:(oh-ih)/2,"
-            f"setpts=PTS/{speed}[v{index}]"
-        )
-    concat_inputs = "".join(f"[v{i}]" for i in range(len(sources)))
-    filters.append(f"{concat_inputs}concat=n={len(sources)}:v=1:a=0[outv]")
-    command = [
-        imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
-        "-nostdin", "-y", *inputs, "-filter_complex", ";".join(filters),
-        "-map", "[outv]", "-an", "-c:v", "libx264", "-preset", "medium",
-        "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary),
-    ]
-    try:
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
-        if completed.returncode:
-            detail = completed.stderr.strip().splitlines()
-            raise VideoToolError(detail[-1] if detail else "视频混剪失败")
-        temporary.replace(output)
-    finally:
-        temporary.unlink(missing_ok=True)
+    if recipe and recipe.clean_mode:
+        from clean_remix import render_clean_remix
+        render_clean_remix(sources, output, root=root or sources[0].parent,
+                           recipe=recipe, progress=progress, dedupe=dedupe)
+        return
+    render_remix(sources, output, root=root or sources[0].parent,
+                 recipe=recipe or RemixRecipe(speed=speed), progress=progress)
 
 
 def duplicate_groups(root: Path, paths: list[str] | None = None) -> list[dict]:
@@ -112,19 +77,36 @@ def duplicate_groups(root: Path, paths: list[str] | None = None) -> list[dict]:
 
 
 class VideoRemixManager:
-    def __init__(self, max_workers: int = 1) -> None:
+    def __init__(self, max_workers: int = 1, *, state_path: Path | None = None) -> None:
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="video-remix")
         self._lock = Lock()
-        self._tasks: dict[str, dict] = {}
+        self._journal = TaskJournal(state_path)
+        self._tasks = self._journal.load()
+        self.knowledge = None
 
-    def submit(self, root: Path, sources: list[Path], *, speed: float = 1.0) -> dict:
+    def recover(self):
+        if self._journal.path is not None:
+            with self._lock:
+                self._tasks = self._journal.recover()
+
+    def _update(self, task_id, **changes):
+        with self._lock:
+            task = {**self._tasks[task_id], **changes}
+            self._journal.save(task)
+            self._tasks[task_id] = task
+
+    def submit(self, root: Path, sources: list[Path], *, speed: float = 1.0, recipe: RemixRecipe | None = None, user_id: str = "") -> dict:
+        recipe = (recipe or RemixRecipe(speed=speed)).model_copy(deep=True)
+        validate_recipe(root, sources, recipe)
         task_id = uuid4().hex
         task = {"task_id": task_id, "state": "pending", "created_at": int(time()),
                 "started_at": None, "finished_at": None, "paths": [p.relative_to(root).as_posix() for p in sources],
-                "output": "", "error": "", "speed": speed}
+                "output": "", "error": "", "speed": recipe.speed, "progress": 0,
+                "recipe": recipe.model_dump(mode="json"), "user_id": user_id}
         with self._lock:
+            self._journal.add(task, self._tasks)
             self._tasks[task_id] = task
-        self._executor.submit(self._run, task_id, root, sources, speed)
+        self._executor.submit(self._run, task_id, root, sources, recipe)
         return deepcopy(task)
 
     def snapshot(self) -> list[dict]:
@@ -134,14 +116,34 @@ class VideoRemixManager:
     def shutdown(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
-    def _run(self, task_id: str, root: Path, sources: list[Path], speed: float) -> None:
-        with self._lock:
-            self._tasks[task_id].update(state="processing", started_at=int(time()))
+    def _run(self, task_id: str, root: Path, sources: list[Path], recipe: RemixRecipe) -> None:
+        self._update(task_id, state="processing", started_at=int(time()))
+        dedupe = None
         try:
             output = _next_output(root)
-            remix_videos(sources, output, speed=speed)
-            with self._lock:
-                self._tasks[task_id].update(state="success", output=output.relative_to(root).as_posix(), finished_at=int(time()))
+            if self.knowledge is not None and recipe.clean_mode:
+                from remix_knowledge import knowledge_policy
+                import json
+                user_id = self._tasks[task_id].get('user_id', '')
+                policy = knowledge_policy(self.knowledge, ' '.join(p.stem for p in sources))
+                with self.knowledge._connection() as db:
+                    rows = db.execute("SELECT i.request_payload FROM generation_records r JOIN generation_inputs i ON i.record_id=r.id WHERE r.user_id=? AND r.mode='video-remix' ORDER BY r.created_at DESC LIMIT 100", (user_id,)).fetchall()
+                history = [json.loads(row[0]).get('dedupe_report', {}) for row in rows]
+                dedupe = {'policy': policy, 'history': history}
+                self._update(task_id, knowledge_used=policy['sources'])
+            def progress(done, total):
+                self._update(task_id, progress=round(done / total * 100))
+            remix_videos(sources, output, root=root, recipe=recipe, progress=progress, dedupe=dedupe)
+            if dedupe is not None:
+                report = dedupe['report']
+                run_id = self.knowledge.record_run(user_id, 'video-remix', False,
+                    '\n'.join(p.name for p in sources), policy['prompt'],
+                    '混剪完成；已执行本地多重去重检查', [], [s['id'] for s in policy['sources']],
+                    'local-ffmpeg', {'recipe': recipe.model_dump(mode='json'), 'dedupe_report': report,
+                                     'output_path': output.relative_to(root).as_posix()})
+                self._update(task_id, dedupe_report=report, run_id=run_id)
+            self._update(task_id, state="success", output=output.relative_to(root).as_posix(), finished_at=int(time()))
         except Exception as error:
-            with self._lock:
-                self._tasks[task_id].update(state="failed", error=str(error), finished_at=int(time()))
+            if dedupe is not None and dedupe.get('report'):
+                self._update(task_id, dedupe_report=dedupe['report'])
+            self._update(task_id, state="failed", error=str(error), finished_at=int(time()))

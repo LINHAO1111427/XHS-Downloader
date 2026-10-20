@@ -1,0 +1,33 @@
+FROM ghcr.io/astral-sh/uv:0.8.22-python3.12-bookworm-slim
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+    UV_LINK_MODE=copy PLAYWRIGHT_BROWSERS_PATH=/opt/browsers \
+    XHS_SERVER_DATA_ROOT=/data XHS_BROWSER_HEADLESS=1 \
+    PATH="/app/.venv/bin:$PATH" HOME=/data
+WORKDIR /app
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ffmpeg ca-certificates fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+RUN uv pip install --index-url https://pypi.org/simple --python /app/.venv/bin/python playwright==1.63.0 cryptography==50.0.0 \
+    && python -m playwright install --with-deps chromium \
+    && chmod -R a+rX /opt/browsers
+COPY *.py ./
+COPY source ./source
+COPY locale ./locale
+COPY static ./static
+COPY vendor/README.md ./vendor/README.md
+COPY vendor/douk_downloader/src ./vendor/douk_downloader/src
+COPY vendor/douk_downloader/LICENSE ./vendor/douk_downloader/LICENSE
+COPY vendor/ks_downloader/source ./vendor/ks_downloader/source
+COPY vendor/ks_downloader/LICENSE ./vendor/ks_downloader/LICENSE
+COPY LICENSE ./LICENSE
+RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app \
+    && mkdir -p /data/.cache /app/Volume /app/vendor/douk_downloader/Volume /app/vendor/ks_downloader/Volume \
+    && chown app:app /data /data/.cache /app/Volume /app/vendor/douk_downloader/Volume /app/vendor/ks_downloader/Volume
+USER 10001:10001
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready',timeout=4)"
+CMD ["uvicorn", "server_app:create_server_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-proxy-headers", "--timeout-graceful-shutdown", "330"]

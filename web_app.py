@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 from time import time
 from contextlib import asynccontextmanager
 from datetime import datetime
+from functools import lru_cache
+from hashlib import sha256
+from shutil import copyfile
 from hmac import compare_digest
 from io import BytesIO
 from mimetypes import guess_type
@@ -21,6 +25,7 @@ import uvicorn
 from PIL import Image, ImageOps, UnidentifiedImageError
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
+from account_factory import AccountFactory, register_factory_routes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -28,6 +33,8 @@ from starlette.background import BackgroundTask
 from ai_gateway import AIConfigError, AIConfigStore, AIGateway, AIGatewayConnectionError
 from billing import BillingError, BillingStore, QuotaExceeded, IMAGE_COST, TEXT_COST
 from batch_image_edit import BatchImageEditManager
+from rewrite_workflow import RewriteWorkflow, register_rewrite_routes
+from ima_knowledge import IMAError, IMAKnowledge, register_ima_routes
 from auth import (
     AccountConflict,
     AccountDisabled,
@@ -44,6 +51,8 @@ from copywriting_master import (
     CopywritingInputError,
     normalize_keywords,
 )
+from download_exports import DownloadExporter, DownloadExportError
+from nine_grid import NineGridError, compose_nine_grid
 from knowledge_base import (
     GenerationRunNotFound,
     KnowledgeBase,
@@ -51,20 +60,41 @@ from knowledge_base import (
     KnowledgeEntryNotFound,
 )
 from media_enhancer import EnhancementManager, SUPPORTED_MEDIA_SUFFIXES
-from live_photo import LivePhotoManager, SUPPORTED_LIVE_PHOTO_SUFFIXES
+from ai_motion import AIMotionProvider, LTXSpaceMotionProvider
+from live_photo import (
+    DEFAULT_LIVE_PHOTO_DURATION,
+    LivePhotoManager,
+    SUPPORTED_LIVE_PHOTO_SUFFIXES,
+)
 from alibaba1688 import Alibaba1688Collector
+from commerce_listing import register_commerce_routes
+from xhs_products import XHSProductCollector
+from product_images import cache_product_images, product_local_images
+from product_videos import product_local_videos
 from video_tools import (
     VIDEO_SUFFIXES as REMIX_VIDEO_SUFFIXES,
     VideoRemixManager,
     VideoToolError,
     duplicate_groups,
 )
+from video_compositor import RemixRecipe, probe_video
 from video_creator import AUDIO_SUFFIXES, IMAGE_SUFFIXES as SLIDESHOW_IMAGE_SUFFIXES, SlideshowError, SlideshowManager, list_music
 from source.GUI.backend import GuiBackend
 from source.module import PROJECT, ROOT
 from viral_notes import ViralError, ViralRules, ViralSchedule, ViralService, ViralStore, export_csv
+from market_discovery import DiscoveryService, discovery_router
+from daily_selection import DailySelection, daily_selection_router
+from selection_strategy import SelectionStrategy
+from viral_browser import BrowserDiscoveryFactory
+from xhs_login import LoginError, XHSLoginService
+from xhs_operations import (
+    OperationService,
+    OperationStore,
+    register_operation_routes,
+)
 
 WEB_ROOT = ROOT / "static" / "web"
+WEB_APP_SHA256 = sha256(Path(__file__).read_bytes()).hexdigest().upper()
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5557
 LIBRARY_SUFFIXES = {
@@ -88,6 +118,7 @@ AI_IMAGE_TYPES = {
     ".png": "image/png",
     ".webp": "image/webp",
 }
+AI_UPLOAD_FORMAT_SUFFIXES = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
 MAX_AI_IMAGE_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_AI_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_AI_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024
@@ -112,6 +143,8 @@ class Runtime(Protocol):
 
     def create_tasks(self, content: str, index: list[int] | None) -> list[dict]: ...
 
+    def collect_reference(self, content: str) -> dict: ...
+
     def cancel_task(self, task_id: str) -> bool: ...
 
     def clear_finished(self) -> int: ...
@@ -135,7 +168,7 @@ class DownloaderRuntime:
             local_data_root or ROOT / "Volume",
             "下载数据目录",
         )
-        self.backend = GuiBackend()
+        self.backend = GuiBackend(self.local_data_root)
 
     def start(self) -> None:
         settings = self.backend.settings_manager.run()
@@ -161,6 +194,88 @@ class DownloaderRuntime:
 
     def create_tasks(self, content: str, index: list[int] | None) -> list[dict]:
         return self.backend.call(self.backend.create_tasks(content, index))
+
+    def collect_reference(self, content: str, *, allow_video: bool = False) -> dict:
+        # Lightweight runtime adapters used by tests/embedders may only expose
+        # extraction.  They still receive metadata, while the full desktop
+        # runtime additionally persists the reference images.
+        media_root = self.download_root() if hasattr(self.backend, "call") else None
+        # Douyin and Kuaishou references use the same normalized shape as XHS
+        # references.  Their videos are therefore handed to AccountFactory as
+        # ``reference_video`` assets and participate in the same AI plan.
+        from platform_sources import collect_platform_reference, detect_platform
+
+        if detect_platform(content):
+            return collect_platform_reference(
+                content,
+                media_root,
+                allow_video=allow_video,
+            )
+
+        async def collect():
+            links = list(dict.fromkeys(await self.backend.xhs.extract_links(content)))
+            if len(links) != 1:
+                raise ValueError("一键改写每次请选择一篇对标笔记")
+            records = await self.backend.xhs.extract(links[0], download=False, check_record=False)
+            if not records or not records[0].get("作品ID"):
+                detail = getattr(self.backend.xhs.html, "last_error", "")
+                raise ValueError(detail or "笔记采集失败，请检查链接和 Cookie")
+            note = records[0]
+            urls = note.get("下载地址", [])
+            if isinstance(urls, str):
+                urls = urls.split()
+            is_video = note.get("作品类型") not in {"图文", "图集"}
+            if is_video and not allow_video:
+                raise ValueError("请选择有配图的图文笔记")
+            note_id = str(note["作品ID"])
+            cached, image_errors = ([], [])
+            video_paths, video_errors = [], []
+            if is_video and media_root is not None:
+                from product_videos import cache_product_videos
+                cached_videos, video_errors = await asyncio.to_thread(
+                    cache_product_videos, media_root / "小红书对标视频", note_id,
+                    [str(url) for url in urls if str(url).startswith(("http://", "https://"))][:2],
+                )
+                video_paths = [f"小红书对标视频/{path}" for path in cached_videos]
+            elif media_root is not None:
+                cache_root = media_root / "小红书对标笔记"
+                cached, image_errors = await asyncio.to_thread(
+                    cache_product_images,
+                    cache_root,
+                    note_id,
+                    [str(url) for url in urls if str(url).startswith(("http://", "https://"))][:12],
+                )
+            return {
+                "note_id": note_id,
+                "url": links[0],
+                "title": str(note.get("作品标题", "")),
+                "body": str(note.get("作品描述", "")),
+                "tags": [value.lstrip("#") for value in str(note.get("作品标签", "")).split() if value],
+                "author": str(note.get("作者昵称", "")),
+                "author_id": str(note.get("作者ID", "")),
+                "published_at": note.get("时间戳"),
+                "likes": note.get("点赞数量"),
+                "collects": note.get("收藏数量"),
+                "comments": note.get("评论数量"),
+                "shares": note.get("分享数量"),
+                "type": "video" if is_video else "normal",
+                "image_urls": [] if is_video else urls,
+                "image_paths": [f"小红书对标笔记/{path}" for path in cached],
+                "image_errors": image_errors,
+                "video_paths": video_paths,
+                "video_errors": video_errors,
+                "products": note.get("挂载商品") or [],
+            }
+
+        self.backend.wait_until_ready(timeout=30)
+        if self.backend.closed or not self.backend.loop:
+            raise RuntimeError("下载服务未启动")
+        future = asyncio.run_coroutine_threadsafe(collect(), self.backend.loop)
+        try:
+            return future.result(timeout=180)
+        except TimeoutError:
+            future.cancel()
+            raise ValueError("笔记采集超时，请稍后重试")
 
     def cancel_task(self, task_id: str) -> bool:
         return self.backend.call(self.backend.cancel_task(task_id))
@@ -207,6 +322,18 @@ class ArchiveRequest(BaseModel):
     paths: Annotated[list[str], Field(min_length=1, max_length=200)]
 
 
+class DownloadDirectoryRequest(BaseModel):
+    directory: Annotated[str, Field(min_length=1, max_length=4_096)]
+
+
+class ExportRequest(BaseModel):
+    paths: Annotated[list[str], Field(max_length=400)] = Field(default_factory=list)
+    title: Annotated[str, Field(max_length=200)] = ""
+    kind: Literal["text", "graphic", "live_photo", "file"] = "file"
+    text: Annotated[str | None, Field(max_length=200_000)] = None
+    text_filename: Annotated[str, Field(max_length=200)] = "文案.txt"
+
+
 class EnhancementRequest(BaseModel):
     paths: Annotated[list[str], Field(min_length=1, max_length=50)]
 
@@ -214,7 +341,9 @@ class EnhancementRequest(BaseModel):
 class LivePhotoRequest(BaseModel):
     path: Annotated[str, Field(min_length=1, max_length=2_048)]
     start: Annotated[float, Field(ge=0, le=86_400)] = 0
-    duration: Annotated[float, Field(ge=0.5, le=5)] = 3
+    duration: Annotated[float, Field(ge=0.5, le=5)] = DEFAULT_LIVE_PHOTO_DURATION
+    motion_mode: Literal["camera", "ai_object"] = "camera"
+    motion_prompt: Annotated[str, Field(max_length=1_000)] = ""
 
 
 class AlibabaCollectRequest(BaseModel):
@@ -223,9 +352,17 @@ class AlibabaCollectRequest(BaseModel):
     limit: Annotated[int, Field(ge=1, le=200)] = 50
 
 
-class VideoRemixRequest(BaseModel):
-    paths: Annotated[list[str], Field(min_length=1, max_length=20)]
-    speed: Annotated[float, Field(gt=0.5, le=2.0)] = 1.0
+class XHSProductRequest(BaseModel):
+    content: Annotated[str, Field(min_length=1, max_length=20_000)]
+
+
+class AlibabaImageImportRequest(BaseModel):
+    image_url: Annotated[str, Field(min_length=1, max_length=2_048)]
+    product_id: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class VideoRemixRequest(RemixRecipe):
+    paths: Annotated[list[str], Field(max_length=20)] = Field(default_factory=list)
 
 
 class VideoDedupeRequest(BaseModel):
@@ -243,7 +380,10 @@ class AIConfigRequest(BaseModel):
     api_key: Annotated[str, Field(max_length=32_000)] = ""
     model: Annotated[str, Field(max_length=256)] = ""
     image_model: Annotated[str, Field(max_length=256)] = ""
+    image_base_url: Annotated[str, Field(max_length=2_048)] = ""
+    image_api_key: Annotated[str, Field(max_length=32_000)] = ""
     clear_api_key: bool = False
+    clear_image_api_key: bool = False
     protocol: Annotated[str, Field(max_length=32)] = "responses"
 
 
@@ -275,6 +415,10 @@ class AIImageEditRequest(BaseModel):
     instructions: Annotated[str, Field(max_length=4_000)] = ""
     image_size: Literal["1024x1024", "1024x1536", "1536x1024"] = "1024x1536"
     image_quality: Literal["low", "medium", "high"] = "medium"
+
+
+class NineGridRequest(BaseModel):
+    image_paths: Annotated[list[str], Field(min_length=9, max_length=9)]
 
 
 class RegisterRequest(BaseModel):
@@ -322,6 +466,7 @@ class GenerationFeedbackRequest(BaseModel):
 
 class BillingOrderRequest(BaseModel):
     plan_id: Annotated[str, Field(min_length=1, max_length=40)]
+    provider: Literal["unconfigured", "wechat", "alipay"] = "unconfigured"
 
 
 class BillingGrantRequest(BaseModel):
@@ -406,9 +551,85 @@ def _load_ai_images(root: Path, image_paths: list[str]) -> list[tuple[str, bytes
     return images
 
 
+def _store_uploaded_ai_image(root: Path, filename: str, data: bytes) -> dict:
+    if not data:
+        raise HTTPException(status_code=422, detail="请选择要上传的图片")
+    if len(data) > MAX_AI_IMAGE_SOURCE_BYTES:
+        raise HTTPException(status_code=413, detail="本地图片不能超过 64 MB")
+    try:
+        with Image.open(BytesIO(data)) as source:
+            source.load()
+            image_format = (source.format or "").upper()
+            width, height = source.size
+    except (Image.DecompressionBombError, UnidentifiedImageError, OSError) as error:
+        raise HTTPException(status_code=422, detail="上传文件不是有效图片") from error
+    suffix = AI_UPLOAD_FORMAT_SUFFIXES.get(image_format)
+    if not suffix:
+        raise HTTPException(status_code=422, detail="仅支持 JPG、PNG 和 WebP 图片")
+
+    supplied_name = Path(filename.replace("\\", "/")).name
+    supplied_stem = Path(supplied_name).stem
+    safe_stem = "".join(
+        character if character.isalnum() or character in {"-", "_", " "} else "_"
+        for character in supplied_stem
+    )
+    safe_stem = "_".join(safe_stem.split()).strip("._-")[:60] or "image"
+    output_dir = root / "AI上传"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    name = f"LOCAL_{safe_stem}_{datetime.now():%Y%m%d_%H%M%S}_{token_hex(3)}{suffix}"
+    target = output_dir / name
+    with NamedTemporaryFile(
+        dir=output_dir,
+        prefix=f".{name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as temporary:
+        temporary.write(data)
+        temporary_path = Path(temporary.name)
+    temporary_path.replace(target)
+    stat = target.stat()
+    relative = target.relative_to(root).as_posix()
+    return {
+        "path": relative,
+        "name": name,
+        "suffix": suffix.lstrip("."),
+        "size": stat.st_size,
+        "modified": int(stat.st_mtime),
+        "width": width,
+        "height": height,
+        "download_url": "/files/" + quote(relative, safe="/"),
+        "thumbnail_url": (
+            "/api/thumbnails/"
+            + quote(relative, safe="/")
+            + f"?v={stat.st_mtime_ns}-{stat.st_size}"
+        ),
+        "preview_url": "/media/" + quote(relative, safe="/"),
+        "media_kind": "image",
+        "ai_compatible": True,
+    }
+
+
 def _store_generated_image(root: Path, data: bytes, prefix: str = "AI") -> dict:
-    suffix = _generated_image_suffix(data)
-    output_dir = root / "AI生成"
+    # Normalize every generated raster to JPEG so generated assets follow the
+    # same download format as collected product images.
+    try:
+        with Image.open(BytesIO(data)) as source:
+            source.load()
+            image = ImageOps.exif_transpose(source)
+            if image.mode in {"RGBA", "LA"} or (image.mode == "P" and "transparency" in image.info):
+                rgba = image.convert("RGBA")
+                background = Image.new("RGB", rgba.size, "white")
+                background.paste(rgba, mask=rgba.getchannel("A"))
+                image = background
+            elif image.mode != "RGB":
+                image = image.convert("RGB")
+            output = BytesIO()
+            image.save(output, format="JPEG", quality=95, optimize=True, progressive=True)
+            data = output.getvalue()
+    except (Image.DecompressionBombError, UnidentifiedImageError, OSError) as error:
+        raise AIGatewayConnectionError("AI image response is not a valid raster image") from error
+    suffix = ".jpg"
+    output_dir = root / "AI\u751f\u6210"
     output_dir.mkdir(parents=True, exist_ok=True)
     name = f"{prefix}_{datetime.now():%Y%m%d_%H%M%S}_{token_hex(3)}{suffix}"
     target = output_dir / name
@@ -429,6 +650,27 @@ def _store_generated_image(root: Path, data: bytes, prefix: str = "AI") -> dict:
         "preview_url": "/media/" + quote(relative, safe="/"),
         "download_url": "/files/" + quote(relative, safe="/"),
     }
+
+
+@lru_cache(maxsize=128)
+def _thumbnail(path: str, modified_ns: int, size: int) -> bytes:
+    # The revision parameters invalidate cached thumbnails when a file changes.
+    with Image.open(path) as source:
+        source.draft("RGB", (360, 360))
+        source.thumbnail((360, 360))
+        preview = ImageOps.exif_transpose(source).convert("RGB")
+        output = BytesIO()
+        preview.save(output, "JPEG", quality=78)
+        return output.getvalue()
+
+
+@lru_cache(maxsize=8)
+def _clipboard_png(path: str, modified_ns: int, size: int) -> bytes:
+    with Image.open(path) as source:
+        image = ImageOps.exif_transpose(source).convert("RGBA")
+        output = BytesIO()
+        image.save(output, "PNG")
+        return output.getvalue()
 
 
 def _library(runtime: Runtime, limit: int) -> dict:
@@ -465,6 +707,11 @@ def _library(runtime: Runtime, limit: int) -> dict:
                 "size": stat.st_size,
                 "modified": int(stat.st_mtime),
                 "download_url": "/files/" + quote(relative, safe="/"),
+                "thumbnail_url": (
+                    "/api/thumbnails/" + quote(relative, safe="/")
+                    + f"?v={stat.st_mtime_ns}-{stat.st_size}"
+                    if media_kind == "image" else ""
+                ),
                 "preview_url": (
                     "/media/" + quote(relative, safe="/")
                     if media_kind in {"image", "video"}
@@ -487,6 +734,7 @@ def create_app(
     web_root: Path | None = None,
     enhancer: EnhancementManager | None = None,
     live_photo_manager: LivePhotoManager | None = None,
+    ai_motion_provider: AIMotionProvider | None = None,
     remix_manager: VideoRemixManager | None = None,
     slideshow_manager: SlideshowManager | None = None,
     batch_image_manager: BatchImageEditManager | None = None,
@@ -497,60 +745,81 @@ def create_app(
     billing_store: BillingStore | None = None,
     viral_service: ViralService | None = None,
     corpus_path: Path | None = None,
+    download_exporter: DownloadExporter | None = None,
+    operation_store: OperationStore | None = None,
+    data_root: Path | None = None,
+    server_mode: bool = False,
+    durable_tasks: bool = False,
+    discovery_service: DiscoveryService | None = None,
 ) -> FastAPI:
+    def storage_path(variable: str, default: Path) -> Path:
+        # An explicit workspace must never inherit another workspace's env paths.
+        return default if data_root is not None else Path(os.getenv(variable, str(default)))
+
     local_data_root = _require_non_c_storage(
-        Path(os.getenv("XHS_LOCAL_DATA_ROOT", str(ROOT / "Volume"))),
+        data_root or Path(os.getenv("XHS_LOCAL_DATA_ROOT", str(ROOT / "Volume"))),
         "本地数据目录",
     )
     local_data_root.mkdir(parents=True, exist_ok=True)
     active_runtime = runtime or DownloaderRuntime(local_data_root)
+    persistent_tasks = server_mode or durable_tasks
     delete_enhanced_sources = os.getenv("XHS_DELETE_ENHANCED_SOURCE", "true").strip().lower() in {"1", "true", "yes", "on"}
-    active_enhancer = enhancer or EnhancementManager(delete_image_sources=delete_enhanced_sources)
-    active_live_photo = live_photo_manager or LivePhotoManager()
-    active_remix = remix_manager or VideoRemixManager()
-    active_slideshow = slideshow_manager or SlideshowManager()
-    active_batch_image = batch_image_manager or BatchImageEditManager()
+    active_enhancer = enhancer or EnhancementManager(
+        delete_image_sources=delete_enhanced_sources,
+        state_path=local_data_root / "tasks" / "enhancements.db" if persistent_tasks else None,
+    )
+    active_live_photo = live_photo_manager or LivePhotoManager(
+        ai_motion_provider=ai_motion_provider or LTXSpaceMotionProvider(),
+        state_path=local_data_root / "tasks" / "live-photos.db" if persistent_tasks else None,
+    )
+    active_remix = remix_manager or VideoRemixManager(
+        state_path=local_data_root / "tasks" / "remixes.db" if persistent_tasks else None,
+    )
+    active_slideshow = slideshow_manager or SlideshowManager(
+        state_path=local_data_root / "tasks" / "slideshows.db" if persistent_tasks else None,
+    )
     active_ai_gateway = ai_gateway or AIGateway(
         AIConfigStore(
             _require_non_c_storage(
-                Path(
-                    os.getenv(
-                        "XHS_AI_CONFIG_PATH",
-                        str(local_data_root / "ai_config.json"),
-                    )
-                ),
+                storage_path("XHS_AI_CONFIG_PATH", local_data_root / "ai_config.json"),
                 "AI 配置文件",
             )
         )
     )
     active_auth = auth_store or AuthStore(
         _require_non_c_storage(
-            Path(
-                os.getenv(
-                    "XHS_AUTH_DB_PATH",
-                    str(local_data_root / "users.db"),
-                )
-            ),
+            storage_path("XHS_AUTH_DB_PATH", local_data_root / "users.db"),
             "用户数据库",
         )
     )
     active_login_throttle = login_throttle or LoginThrottle()
     active_knowledge = knowledge_base or KnowledgeBase(
         _require_non_c_storage(
-            Path(
-                os.getenv(
-                    "XHS_KNOWLEDGE_DB_PATH",
-                    str(local_data_root / "knowledge.db"),
-                )
-            ),
+            storage_path("XHS_KNOWLEDGE_DB_PATH", local_data_root / "knowledge.db"),
             "知识库数据库",
         )
     )
+    active_remix.knowledge = active_knowledge
+    active_download_exporter = download_exporter or DownloadExporter(
+        local_data_root / "download-export.json",
+        local_data_root / "Exports",
+    )
     active_billing = billing_store or BillingStore(
         _require_non_c_storage(
-            Path(os.getenv("XHS_BILLING_DB_PATH", str(local_data_root / "billing.db"))),
+            storage_path("XHS_BILLING_DB_PATH", local_data_root / "billing.db"),
             "计费数据库",
         )
+    )
+    active_billing.set_unlimited_users(
+        {
+            user["id"]
+            for user in active_auth.list_users()
+            if user.get("role") == "admin" and user.get("is_active")
+        }
+    )
+    active_batch_image = batch_image_manager or BatchImageEditManager(
+        state_path=local_data_root / "tasks" / "batch-images.db" if persistent_tasks else None,
+        billing=active_billing,
     )
     configured_corpus_path = (
         corpus_path
@@ -567,30 +836,40 @@ def create_app(
     ):
         corpus_import = active_knowledge.import_corpus(configured_corpus_path)
     assets = (web_root or WEB_ROOT).resolve()
+    active_discovery = discovery_service or DiscoveryService(active_knowledge.path.parent)
     active_viral = viral_service or ViralService(
         ViralStore(
             _require_non_c_storage(
-                Path(
-                    os.getenv(
-                        "XHS_VIRAL_DB_PATH",
-                        str(local_data_root / "viral_notes.db"),
-                    )
-                ),
+                storage_path("XHS_VIRAL_DB_PATH", local_data_root / "viral_notes.db"),
                 "爆款采集数据库",
             )
         ),
         active_runtime.discovery_settings,
+        BrowserDiscoveryFactory(active_runtime.save_cookie),
     )
     if not (assets / "index.html").is_file():
         raise FileNotFoundError(f"网页入口不存在：{assets / 'index.html'}")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        for manager in (active_batch_image, active_enhancer, active_live_photo, active_remix, active_slideshow):
+            recover = getattr(manager, "recover", None)
+            if recover is not None:
+                await asyncio.to_thread(recover)
         await asyncio.to_thread(active_runtime.start)
         try:
             await asyncio.to_thread(active_viral.start)
+            active_factory.start()
+            active_daily_selection.start()
             yield
         finally:
+            await asyncio.to_thread(active_daily_selection.shutdown)
+            await asyncio.to_thread(active_discovery.shutdown)
+            await asyncio.to_thread(active_factory.shutdown)
+            await asyncio.to_thread(active_xhs_login.shutdown)
+            await asyncio.to_thread(app.state.commerce_browser.shutdown)
+            await asyncio.to_thread(active_rewrite.shutdown)
+            await asyncio.to_thread(active_operations.shutdown)
             await asyncio.to_thread(active_viral.shutdown)
             await asyncio.to_thread(active_runtime.stop)
             active_enhancer.shutdown()
@@ -598,6 +877,23 @@ def create_app(
             active_remix.shutdown()
             active_slideshow.shutdown()
             active_batch_image.shutdown()
+            active_1688.shutdown()
+            active_xhs_products.shutdown()
+            if persistent_tasks:
+                # Keep the server's exclusive lock until worker threads finish.
+                # Otherwise a replacement process could recover charges while
+                # the previous process was still writing results or billing.
+                def drain_workers():
+                    for manager in (
+                        active_factory, active_operations, active_rewrite,
+                        active_enhancer, active_live_photo, active_remix,
+                        active_slideshow, active_batch_image, active_1688,
+                        active_xhs_products,
+                    ):
+                        executor = getattr(manager, "_executor", None) or getattr(manager, "executor", None)
+                        if executor is not None:
+                            executor.shutdown(wait=True, cancel_futures=True)
+                await asyncio.to_thread(drain_workers)
 
     app = FastAPI(
         title=f"{PROJECT} Web",
@@ -607,6 +903,14 @@ def create_app(
         openapi_url=None,
     )
     app.state.runtime = active_runtime
+    from task_journal import TaskQueueFull
+
+    @app.exception_handler(TaskQueueFull)
+    async def task_queue_full(_request, error):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": str(error)}, status_code=429, headers={"Retry-After": "5"})
+    active_xhs_login = XHSLoginService(active_runtime.save_cookie)
+    app.state.xhs_login = active_xhs_login
     app.state.enhancer = active_enhancer
     app.state.live_photo_manager = active_live_photo
     app.state.remix_manager = active_remix
@@ -615,12 +919,46 @@ def create_app(
     app.state.ai_gateway = active_ai_gateway
     app.state.auth_store = active_auth
     app.state.knowledge_base = active_knowledge
+    app.state.download_exporter = active_download_exporter
     app.state.billing = active_billing
     app.state.corpus_path = configured_corpus_path
     app.state.corpus_import = corpus_import
     app.state.viral_service = active_viral
-    active_1688 = Alibaba1688Collector(Path(os.getenv("XHS_1688_STORE_PATH", str(ROOT / "Volume" / "1688" / "products.json"))))
+    app.state.discovery_service = active_discovery
+    active_1688 = Alibaba1688Collector(storage_path("XHS_1688_STORE_PATH", local_data_root / "1688" / "products.json"))
     app.state.alibaba1688 = active_1688
+    active_xhs_products = XHSProductCollector(local_data_root / "xhs-products" / "products.json", settings_provider=active_runtime.discovery_settings)
+    app.state.xhs_products = active_xhs_products
+    operation_path = storage_path("XHS_OPERATION_DB_PATH", active_knowledge.path.parent / "xhs_operations.db")
+    if operation_store is not None:
+        active_operation_store = operation_store
+    elif knowledge_base is not None:
+        # Injected stores are used by tests and embedders and may intentionally
+        # live on the system drive, just like the injected knowledge database.
+        active_operation_store = OperationStore(operation_path)
+    else:
+        active_operation_store = OperationStore(
+            _require_non_c_storage(operation_path, "小红书运营数据库")
+        )
+    active_operations = OperationService(
+        active_operation_store,
+        active_runtime,
+        active_ai_gateway,
+        active_knowledge,
+        active_billing,
+        _load_ai_images,
+        active_viral,
+        {"1688": active_1688, "xhs": active_xhs_products},
+        remix_manager=active_remix,
+        slideshow_manager=active_slideshow,
+    )
+    app.state.operation_store = active_operation_store
+    active_discovery.selection = SelectionStrategy(active_knowledge, active_operation_store)
+    active_daily_selection = DailySelection(active_discovery, autostart=discovery_service is None)
+    app.state.daily_selection = active_daily_selection
+    app.state.operation_service = active_operations
+    active_factory = AccountFactory(active_operations, active_knowledge, active_billing, _load_ai_images, _store_generated_image)
+    app.state.account_factory = active_factory
     app.mount("/assets", StaticFiles(directory=assets), name="assets")
 
     @app.middleware("http")
@@ -631,17 +969,18 @@ def create_app(
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault(
             "Content-Security-Policy",
-            "default-src 'self'; img-src 'self' data: blob: https://*.xhscdn.com; media-src 'self'; "
+            "default-src 'self'; img-src 'self' data: blob: https://*.xhscdn.com https://*.alicdn.com https://*.aliimg.com; media-src 'self'; "
             "script-src 'self'; style-src 'self' 'unsafe-inline'; "
             "connect-src 'self'; object-src 'none'; base-uri 'none'; "
             "frame-ancestors 'none'",
         )
-        if request.url.path.startswith("/api/auth"):
+        if request.url.path.startswith(("/api/", "/files/", "/preview/")):
             response.headers["Cache-Control"] = "no-store"
         return response
 
     def session_payload(user: dict, session: dict) -> dict:
         return {
+            "server_mode": server_mode,
             "user": user,
             "csrf_token": session["csrf_token"],
             "expires_at": session["expires_at"],
@@ -652,12 +991,12 @@ def create_app(
         request: Request,
         session: dict,
     ) -> None:
-        forwarded_protocol = request.headers.get("x-forwarded-proto", "")
         secure = (
+            server_mode
+            or
             os.getenv("XHS_WEB_SECURE_COOKIE", "").strip().lower()
             in {"1", "true", "yes", "on"}
             or request.url.scheme == "https"
-            or forwarded_protocol.split(",", 1)[0].strip().lower() == "https"
         )
         response.set_cookie(
             SESSION_COOKIE,
@@ -696,6 +1035,49 @@ def create_app(
             raise HTTPException(status_code=403, detail="需要管理员权限")
         return user
 
+    workspace_user = require_user if server_mode else require_admin
+    workspace_csrf = require_csrf if server_mode else require_admin_csrf
+    app.include_router(discovery_router(active_discovery, require_user, require_admin_csrf))
+    app.include_router(daily_selection_router(active_daily_selection, require_user, require_admin_csrf))
+    register_commerce_routes(app, active_knowledge.path.parent, active_1688, workspace_user, workspace_csrf)
+
+    register_factory_routes(app, active_factory, require_user, require_csrf)
+    active_ima = IMAKnowledge(active_knowledge.path.parent / "ima-connections.json")
+    app.state.ima_knowledge = active_ima
+    register_ima_routes(app, active_ima, require_user, require_csrf)
+    active_rewrite = RewriteWorkflow(
+        active_knowledge.path.parent / "rewrite-jobs", active_runtime, active_ai_gateway,
+        active_knowledge, active_billing, _load_ai_images, _store_generated_image, configured_corpus_path,
+        ima_knowledge=active_ima, viral_store=active_viral.store,
+    )
+    app.state.rewrite_workflow = active_rewrite
+    register_rewrite_routes(app, active_rewrite, require_user, require_csrf)
+    register_operation_routes(
+        app,
+        active_operations,
+        active_rewrite,
+        require_user,
+        require_csrf,
+        active_knowledge,
+    )
+
+    @app.post("/api/knowledge/import-document", status_code=201)
+    async def import_knowledge_document(
+        request: Request,
+        filename: str = Query(min_length=1, max_length=200),
+        kind: Literal["general", "note", "image"] = "note",
+        user: dict = Depends(require_admin_csrf),
+    ):
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > 1024 * 1024:
+                raise HTTPException(413, "文档请控制在 1 MB 内")
+        try:
+            return active_knowledge.import_document(filename, bytes(data), kind, user["id"])
+        except (KnowledgeBaseError, UnicodeError, ValueError) as error:
+            raise HTTPException(422, str(error)) from error
+
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
         return FileResponse(assets / "index.html")
@@ -706,6 +1088,7 @@ def create_app(
             "ok": True,
             "service": "XHS-Downloader Web",
             "version": PROJECT,
+            "web_app_sha256": WEB_APP_SHA256,
             "source_media": "original_cdn",
             "enhancement": "lanczos_2x",
             "ai_gateway": "openai_compatible",
@@ -718,7 +1101,7 @@ def create_app(
 
     @app.get("/api/auth/status")
     def auth_status() -> dict:
-        return active_auth.status()
+        return {**active_auth.status(), "server_mode": server_mode}
 
     @app.post("/api/auth/register", status_code=201)
     def register(
@@ -737,6 +1120,10 @@ def create_app(
         except AuthError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         session = active_auth.create_session(user["id"])
+        if user.get("role") == "admin":
+            active_billing.set_unlimited_users(
+                active_billing.unlimited_user_ids | {user["id"]}
+            )
         set_session_cookie(response, request, session)
         return session_payload(user, session)
 
@@ -820,7 +1207,23 @@ def create_app(
         return {
             "users": active_auth.list_users(),
             "registration_enabled": active_auth.registration_enabled(),
+            "max_users": active_auth.max_users,
         }
+
+    @app.post("/api/admin/users", status_code=201)
+    def create_managed_user(
+        payload: RegisterRequest,
+        admin: dict = Depends(require_admin_csrf),
+    ) -> dict:
+        try:
+            user = active_auth.create_user(
+                payload.email, payload.display_name, payload.password, actor_id=admin["id"]
+            )
+            return {"user": user}
+        except (AccountConflict, RegistrationClosed, AdminActionError) as error:
+            raise HTTPException(409, str(error)) from error
+        except AuthError as error:
+            raise HTTPException(422, str(error)) from error
 
     @app.patch("/api/admin/users/{user_id}")
     def update_user_status(
@@ -867,22 +1270,41 @@ def create_app(
     @app.post("/api/billing/orders", status_code=201)
     def billing_order(
         payload: BillingOrderRequest,
+        request: Request,
         user: dict = Depends(require_csrf),
     ) -> dict:
         try:
-            return active_billing.create_order(user["id"], payload.plan_id)
+            if server_mode:
+                raise HTTPException(409, "支付渠道尚未启用，请联系管理员")
+            return active_billing.create_order(user["id"], payload.plan_id, request_id=request.headers.get("Idempotency-Key"))
         except BillingError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.post("/api/admin/billing/grant")
     def billing_grant(
         payload: BillingGrantRequest,
+        request: Request,
         _admin: dict = Depends(require_admin_csrf),
     ) -> dict:
         try:
-            return active_billing.grant(payload.user_id, payload.units)
-        except BillingError as error:
+            active_auth.get_user(payload.user_id)
+            key = request.headers.get("Idempotency-Key")
+            if server_mode and not key:
+                raise HTTPException(422, "请提供 Idempotency-Key 充值请求标识")
+            return active_billing.grant(payload.user_id, payload.units, request_id=key, actor_id=_admin["id"])
+        except (BillingError, AuthError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/billing/orders/{order_id}")
+    def billing_order_status(order_id: str, user: dict = Depends(require_user)) -> dict:
+        try:
+            return active_billing.order(user["id"], order_id)
+        except BillingError as error:
+            raise HTTPException(404, str(error)) from error
+
+    @app.get("/api/admin/billing/audit")
+    def billing_audit(_admin: dict = Depends(require_admin)) -> dict:
+        return active_billing.audit()
 
     @app.get("/api/knowledge")
     def knowledge_entries(
@@ -1081,7 +1503,12 @@ def create_app(
         request: TaskRequest,
         _user: dict = Depends(require_csrf),
     ) -> dict:
-        created = active_runtime.create_tasks(request.content.strip(), request.index)
+        try:
+            created = active_runtime.create_tasks(request.content.strip(), request.index)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except TimeoutError as error:
+            raise HTTPException(status_code=504, detail="小红书链接解析超时，请稍后重试或复制完整笔记链接") from error
         if not created:
             raise HTTPException(status_code=422, detail="没有识别到有效的小红书链接")
         return {"tasks": created}
@@ -1110,12 +1537,66 @@ def create_app(
     @app.put("/api/settings/cookie")
     def save_cookie(
         request: CookieRequest,
-        _admin: dict = Depends(require_admin_csrf),
+        _admin: dict = Depends(workspace_csrf),
     ) -> dict:
-        result = active_runtime.save_cookie(request.cookie.strip())
+        try:
+            result = active_xhs_login.manual_save(request.cookie.strip())
+        except LoginError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
         if not result.get("ok"):
             raise HTTPException(status_code=409, detail=result.get("error", "保存失败"))
         return {"ok": True, "cookie_configured": bool(request.cookie.strip())}
+
+    @app.get("/api/export-settings")
+    def export_settings(_user: dict = Depends(require_user)) -> dict:
+        try:
+            return active_download_exporter.public_config()
+        except DownloadExportError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+
+    @app.put("/api/export-settings")
+    def save_export_settings(
+        request: DownloadDirectoryRequest,
+        _admin: dict = Depends(require_admin_csrf),
+    ) -> dict:
+        try:
+            return active_download_exporter.configure(request.directory)
+        except DownloadExportError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+
+    @app.post("/api/exports")
+    def export_files(
+        request: ExportRequest,
+        _user: dict = Depends(require_csrf),
+    ) -> dict:
+        try:
+            return active_download_exporter.export(
+                active_runtime.download_root(),
+                request.paths,
+                title=request.title,
+                kind=request.kind,
+                text=request.text,
+                text_filename=request.text_filename,
+            )
+        except DownloadExportError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+        except OSError as error:
+            raise HTTPException(status_code=409, detail=f"导出失败：{error}") from None
+
+    @app.get("/api/xhs/login")
+    def xhs_login_status(_admin: dict = Depends(workspace_user)) -> dict:
+        return active_xhs_login.status()
+
+    @app.post("/api/xhs/login", status_code=202)
+    def xhs_login_start(_admin: dict = Depends(require_admin_csrf)) -> dict:
+        try:
+            return active_xhs_login.start()
+        except LoginError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+
+    @app.delete("/api/xhs/login")
+    def xhs_login_cancel(_admin: dict = Depends(require_admin_csrf)) -> dict:
+        return active_xhs_login.cancel()
 
     @app.post("/api/folder/open")
     def open_folder(_admin: dict = Depends(require_admin_csrf)) -> dict:
@@ -1130,20 +1611,208 @@ def create_app(
     ) -> dict:
         return _library(active_runtime, limit)
 
+    @app.delete("/api/library")
+    def delete_library_file(
+        path: Annotated[str, Query(min_length=1, max_length=2048)],
+        _user: dict = Depends(require_csrf),
+    ) -> dict:
+        target = _resolve_file(active_runtime.download_root(), path)
+        if not target.exists() or not target.is_file():
+            raise HTTPException(status_code=404, detail="文件不存在")
+        target.unlink()
+        return {"ok": True, "path": path}
+
+    @app.post("/api/ai/images/upload", status_code=201)
+    async def upload_ai_image(
+        request: Request,
+        filename: Annotated[str, Query(min_length=1, max_length=255)],
+        _user: dict = Depends(require_csrf),
+    ) -> dict:
+        declared_size = request.headers.get("content-length", "").strip()
+        if declared_size:
+            try:
+                if int(declared_size) > MAX_AI_IMAGE_SOURCE_BYTES:
+                    raise HTTPException(status_code=413, detail="本地图片不能超过 64 MB")
+            except ValueError:
+                pass
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > MAX_AI_IMAGE_SOURCE_BYTES:
+                raise HTTPException(status_code=413, detail="本地图片不能超过 64 MB")
+        item = _store_uploaded_ai_image(
+            active_runtime.download_root().resolve(),
+            filename,
+            bytes(data),
+        )
+        return {"image": item}
+
     @app.get("/api/1688/products")
     def alibaba_products(_user: dict = Depends(require_user)) -> dict:
         products = active_1688.items()
-        return {"products": products, "total": len(products)}
+        return {"products": products, "total": len(products), "job": active_1688.status()}
+
+    @app.post("/api/xhs/products", status_code=202)
+    def xhs_products(payload: XHSProductRequest, _user: dict = Depends(require_csrf)) -> dict:
+        try:
+            job = active_xhs_products.submit([payload.content.strip()])
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"job": job}
+
+    @app.get("/api/xhs/products")
+    def saved_xhs_products(_user: dict = Depends(require_user)) -> dict:
+        products = active_xhs_products.items()
+        return {"products": products, "total": len(products), "job": active_xhs_products.status()}
+
+    @app.get("/api/xhs/products/status")
+    def xhs_product_status(_user: dict = Depends(require_user)) -> dict:
+        return {"job": active_xhs_products.status()}
+
+    def product_collector(platform):
+        return active_1688 if platform == "1688" else active_xhs_products
+
+    @app.post("/api/product-images/{platform}/{product_id}/repair")
+    def repair_product_images(platform: Literal["1688", "xhs"], product_id: str, _user: dict = Depends(require_csrf)) -> dict:
+        try:
+            product = product_collector(platform).repair_images(product_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"product": product}
+
+    @app.get("/api/product-images/{platform}/{product_id}/archive")
+    def product_archive(platform: Literal["1688", "xhs"], product_id: str,
+                        _user: dict = Depends(require_user)) -> FileResponse:
+        collector = product_collector(platform)
+        item = next((item for item in collector.items() if str(item.get("product_id")) == product_id), None)
+        if item is None or not (product_local_images(item) or product_local_videos(item)):
+            raise HTTPException(status_code=404, detail="商品图片尚未保存，请先补齐图片")
+        temporary_root = local_data_root / "Temp"
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(dir=temporary_root, suffix=".zip", delete=False) as temporary:
+            archive_path = Path(temporary.name)
+        try:
+            with ZipFile(archive_path, "w", ZIP_STORED) as archive_file:
+                all_images = product_local_images(item)
+                for group, folder in (("images", "images"), ("detail_images", "details"), ("sku_images", "skus")):
+                    for index, relative in enumerate(product_local_images({"images": item.get(group, [])})):
+                        path = collector.local_image(product_id, all_images.index(relative))
+                        archive_file.write(path, f"{folder}/{index + 1:02d}{path.suffix}")
+                for index in range(len(product_local_videos(item))):
+                    path = collector.local_video(product_id, index)
+                    archive_file.write(path, f"videos/{index + 1:02d}.mp4")
+                archive_file.writestr("product.json", json.dumps(item, ensure_ascii=False, indent=2))
+            return FileResponse(archive_path, filename=f"{platform}-product-assets.zip", background=BackgroundTask(archive_path.unlink))
+        except (OSError, ValueError) as error:
+            archive_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=404, detail="商品图片缺失，请补齐图片后再下载") from error
+
+    @app.get("/api/product-images/{platform}/{product_id}/{image_index}")
+    def product_image(platform: Literal["1688", "xhs"], product_id: str, image_index: int,
+                      format: Literal["original", "png", "thumbnail"] = "original", download: bool = False,
+                      _user: dict = Depends(require_user)) -> Response:
+        try:
+            path = product_collector(platform).local_image(product_id, image_index)
+            stat = path.stat()
+            if format == "thumbnail":
+                return Response(_thumbnail(str(path), stat.st_mtime_ns, stat.st_size), media_type="image/jpeg")
+            if format == "png":
+                return Response(_clipboard_png(str(path), stat.st_mtime_ns, stat.st_size), media_type="image/png")
+            return FileResponse(path, filename=path.name if download else None, headers={"Cache-Control": "private, max-age=3600"})
+        except (ValueError, OSError, Image.DecompressionBombError) as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
+    @app.get("/api/product-videos/{platform}/{product_id}/{video_index}")
+    def product_video(platform: Literal["1688", "xhs"], product_id: str, video_index: int,
+                      download: bool = False, _user: dict = Depends(require_user)) -> FileResponse:
+        try:
+            path = product_collector(platform).local_video(product_id, video_index)
+        except (ValueError, OSError) as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return FileResponse(path, media_type="video/mp4", filename=path.name if download else None,
+                            headers={"Cache-Control": "private, max-age=3600"})
+
+    @app.post("/api/product-videos/{platform}/{product_id}/{video_index}/import")
+    def import_product_video(platform: Literal["1688", "xhs"], product_id: str, video_index: int,
+                             _user: dict = Depends(require_csrf)) -> dict:
+        try:
+            source = product_collector(platform).local_video(product_id, video_index)
+            root = active_runtime.download_root().resolve()
+            folder = root / "商品素材" / platform / sha256(product_id.encode()).hexdigest()[:16]
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / f"video_{video_index}{source.suffix}"
+            partial = folder / f".{uuid4().hex}.part"
+            try:
+                copyfile(source, partial)
+                partial.replace(target)
+            finally:
+                partial.unlink(missing_ok=True)
+            relative = target.relative_to(root).as_posix()
+            return {"path": relative, "name": target.name, "media_kind": "video",
+                    "suffix": target.suffix.lstrip("."), "preview_url": "/media/" + quote(relative, safe="/")}
+        except (ValueError, OSError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.post("/api/product-images/{platform}/{product_id}/{image_index}/import")
+    def import_product_image(platform: Literal["1688", "xhs"], product_id: str, image_index: int,
+                             _user: dict = Depends(require_csrf)) -> dict:
+        try:
+            source = product_collector(platform).local_image(product_id, image_index)
+            root = active_runtime.download_root().resolve()
+            folder = root / "商品素材" / platform / sha256(product_id.encode()).hexdigest()[:16]
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / source.name
+            if source.suffix.lower() in AI_IMAGE_TYPES:
+                copyfile(source, target)
+            else:
+                target = target.with_suffix(".png")
+                with Image.open(source) as image:
+                    image.convert("RGBA").save(target, "PNG")
+            relative = target.relative_to(root).as_posix()
+            return {"path": relative, "name": target.name, "size": target.stat().st_size,
+                    "media_kind": "image", "ai_compatible": True,
+                    "preview_url": "/media/" + quote(relative, safe="/"),
+                    "download_url": "/files/" + quote(relative, safe="/")}
+        except (ValueError, OSError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @app.post("/api/1688/collect", status_code=202)
     def collect_alibaba_products(payload: AlibabaCollectRequest, _user: dict = Depends(require_csrf)) -> dict:
         try:
-            products = active_1688.collect(payload.urls, payload.keyword, payload.limit)
+            job = active_1688.submit(payload.urls, payload.keyword, payload.limit)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {"job": job}
+
+    @app.post("/api/1688/assets/import")
+    def import_alibaba_image(payload: AlibabaImageImportRequest, _user: dict = Depends(require_csrf)) -> dict:
+        try:
+            path = active_1688.import_image(payload.image_url, payload.product_id)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         except Exception as error:
-            raise HTTPException(status_code=502, detail=f"1688 页面采集失败：{error}") from error
-        return {"products": products, "total": len(products)}
+            raise HTTPException(status_code=502, detail=f"商品图片导入失败：{error}") from error
+        return {"path": path}
+
+    @app.get("/api/1688/assets/proxy")
+    def proxy_alibaba_image(image_url: Annotated[str, Query(min_length=1, max_length=2_048)], product_id: Annotated[str, Query(min_length=1, max_length=100)], _user: dict = Depends(require_user)) -> Response:
+        try:
+            content, media_type = active_1688.fetch_image(image_url, product_id)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(status_code=502, detail="商品图片读取失败，请稍后重试") from error
+        return Response(content=content, media_type=media_type, headers={"Cache-Control": "private, max-age=3600"})
+
+    @app.get("/api/1688/status")
+    def alibaba_status(_user: dict = Depends(require_user)) -> dict:
+        return {"job": active_1688.status()}
 
     @app.get("/api/1688/export.csv")
     def export_alibaba_products(_user: dict = Depends(require_user)) -> Response:
@@ -1171,16 +1840,40 @@ def create_app(
         source = _resolve_file(root, request.path)
         if source.suffix.lower() not in SUPPORTED_LIVE_PHOTO_SUFFIXES:
             raise HTTPException(status_code=422, detail=f"这个文件不支持生成实况图：{source.name}")
-        return {"task": active_live_photo.submit(root, source, request.start, request.duration)}
+        try:
+            task = active_live_photo.submit(
+                root,
+                source,
+                request.start,
+                request.duration,
+                request.motion_mode,
+                request.motion_prompt,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"task": task}
 
     @app.get("/api/viral")
     def viral_status(_user: dict = Depends(require_user)) -> dict:
         runs = active_viral.store.runs()
+        daily = active_daily_selection.status(_user["id"])
         return {
+            "daily_selection": {"enabled": bool(daily["config"] and daily["config"]["enabled"]),
+                                "at": daily["config"]["at"] if daily["config"] else None,
+                                "paused": bool(daily["paused"])},
             "schedule": active_viral.store.config(),
             "active_id": active_viral.active_id,
+            "timing": active_viral.schedule_status(),
             "runs": [{key: value for key, value in run.items() if key not in {"items", "errors"}} | {"count": len(run["items"])} for run in runs],
         }
+
+    @app.get("/api/viral/recommendations")
+    def viral_recommendations(_user: dict = Depends(require_user)) -> dict:
+        return active_viral.store.recommendations()
+
+    @app.get("/api/viral/products")
+    def viral_products(_user: dict = Depends(require_user)) -> dict:
+        return active_viral.store.product_recommendations(limit=10)
 
     @app.put("/api/viral/schedule")
     def viral_schedule(payload: ViralSchedule, _admin: dict = Depends(require_admin_csrf)) -> dict:
@@ -1249,6 +1942,9 @@ def create_app(
                 request.clear_api_key,
                 request.protocol,
                 request.image_model,
+                request.image_base_url,
+                request.image_api_key,
+                request.clear_image_api_key,
             )
         except AIConfigError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
@@ -1262,6 +1958,31 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(error)) from error
         except AIGatewayConnectionError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
+
+    @app.post("/api/images/nine-grid")
+    def create_nine_grid_image(
+        request: NineGridRequest,
+        _user: dict = Depends(require_csrf),
+    ) -> dict:
+        root = active_runtime.download_root().resolve()
+        paths = list(dict.fromkeys(request.image_paths))
+        if len(paths) != 9:
+            raise HTTPException(status_code=422, detail="\u4e5d\u5bab\u683c\u5fc5\u987b\u6b63\u597d\u9009\u62e9 9 \u5f20\u56fe\u7247")
+        resolved: list[Path] = []
+        try:
+            for relative in paths:
+                target = _resolve_file(root, relative)
+                if target.suffix.lower() not in IMAGE_SUFFIXES:
+                    raise NineGridError(f"\u4e0d\u652f\u6301\u7684\u56fe\u7247\uff1a{target.name}")
+                resolved.append(target)
+            data = compose_nine_grid(resolved)
+            item = _store_generated_image(root, data, "\u4e5d\u5bab\u683c")
+        except (NineGridError, OSError, HTTPException) as error:
+            if isinstance(error, HTTPException):
+                raise
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"generated_image": item, "image_count": 9, "layout": "3x3"}
+
 
     @app.post("/api/ai/images/edit")
     def edit_ai_image(
@@ -1283,7 +2004,7 @@ def create_app(
             raise HTTPException(status_code=402, detail={"message": str(error), "usage": error.usage}) from error
         except BillingError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        image_knowledge = active_knowledge.retrieve(
+        image_knowledge = active_knowledge.retrieve_for_creation(
             f"{prompt}\n{request.instructions}",
             {"general", "image"},
         )
@@ -1294,7 +2015,7 @@ def create_app(
                 images,
                 request.image_size,
                 request.image_quality,
-                active_knowledge.context(image_knowledge),
+                active_knowledge.context(image_knowledge, query=prompt),
             )
             image_data = generated.pop("data")
             generated_image = _store_generated_image(root, image_data, "AI_EDIT")
@@ -1304,6 +2025,9 @@ def create_app(
         except AIGatewayConnectionError as error:
             active_billing.refund(user["id"], billing_request_id)
             raise HTTPException(status_code=502, detail=str(error)) from error
+        except Exception:
+            active_billing.refund(user["id"], billing_request_id)
+            raise
 
         run_id = active_knowledge.record_run(
             user["id"],
@@ -1333,8 +2057,20 @@ def create_app(
     @app.post("/api/ai/images/edit/batch")
     def edit_ai_images_batch(
         request: AIImageEditRequest,
+        http_request: Request,
         user: dict = Depends(require_csrf),
     ) -> dict:
+        key = http_request.headers.get("Idempotency-Key", "")
+        if server_mode and (not key or len(key) > 128 or not key.isascii() or not key.isprintable()):
+            raise HTTPException(422, "请提供有效的 Idempotency-Key")
+        from hashlib import sha256
+        fingerprint = sha256(request.model_dump_json().encode()).hexdigest()
+        try:
+            previous = active_batch_image.lookup(user["id"], key, fingerprint)
+        except BillingError as error:
+            raise HTTPException(409, str(error)) from error
+        if previous is not None:
+            return {"task": previous}
         root = active_runtime.download_root().resolve()
         prompt = request.prompt.strip()
         if not prompt:
@@ -1343,10 +2079,10 @@ def create_app(
         if len(paths) < 2:
             raise HTTPException(status_code=422, detail="批量修改至少选择 2 张图片")
         usage = active_billing.usage(user["id"])
-        if usage["available_units"] < IMAGE_COST:
+        if not usage.get("unlimited") and usage["available_units"] < IMAGE_COST:
             raise HTTPException(status_code=402, detail={"message": "批量修改所需点数不足", "usage": usage})
-        image_knowledge = active_knowledge.retrieve(f"{prompt}\n{request.instructions}", {"general", "image"})
-        context = active_knowledge.context(image_knowledge)
+        image_knowledge = active_knowledge.retrieve_for_creation(f"{prompt}\n{request.instructions}", {"general", "image"})
+        context = active_knowledge.context(image_knowledge, query=prompt)
 
         def worker(task_id: str) -> None:
             generated_images: list[dict] = []
@@ -1355,67 +2091,62 @@ def create_app(
             revised_prompts: list[str] = []
             model_name = ""
             active_batch_image.update(task_id, state="processing", references_used=len(image_knowledge))
-            for start in range(0, len(paths), 3):
-                for path in paths[start:start + 3]:
+            for index, path in enumerate(paths):
                     request_id = f"image-edit-batch:{uuid4().hex}"
+                    charged = False
                     try:
                         image = _load_ai_images(root, [path])[0]
+                        active_batch_image.update(task_id, active_charge=request_id)
                         receipt = active_billing.consume(user["id"], "image", IMAGE_COST, request_id, {"mode": "image-edit-batch", "path": path})
-                        receipts.append(receipt)
+                        charged = True
                         generated = active_ai_gateway.generate_image(prompt, request.instructions, [image], request.image_size, request.image_quality, context)
                         image_data = generated.pop("data")
-                        generated_images.append(_store_generated_image(root, image_data, "AI_EDIT"))
+                        generated_image = _store_generated_image(root, image_data, "AI_EDIT")
+                        generated_image.update({
+                            "source_path": path,
+                            "source_name": Path(path).name,
+                            "index": index,
+                        })
+                        generated_images.append(generated_image)
+                        receipts.append(receipt)
                         model_name = generated["model"]
                         revised_prompts.append(generated.get("revised_prompt", ""))
-                    except (QuotaExceeded, BillingError, AIConfigError, AIGatewayConnectionError, OSError, HTTPException) as error:
-                        active_billing.refund(user["id"], request_id)
+                    except Exception as error:
+                        if charged:
+                            active_billing.refund(user["id"], request_id)
                         errors.append({"path": path, "error": str(error)})
-                    finally:
-                        active_batch_image.update(task_id, completed=len(generated_images) + len(errors), outputs=generated_images, errors=errors, billing=receipts)
-                import time as _time
-                _time.sleep(0.2)
+                    # Only clear the recovery receipt after success or a confirmed refund.
+                    active_batch_image.update(task_id, completed=len(generated_images) + len(errors), outputs=generated_images, errors=errors, billing=receipts, active_charge="")
+                    import time as _time
+                    _time.sleep(0.2)
+            nine_grid = None
+            nine_grid_error = ""
+            if len(generated_images) == 9:
+                try:
+                    nine_grid_data = compose_nine_grid(
+                        [root / item["path"] for item in generated_images]
+                    )
+                    nine_grid = _store_generated_image(root, nine_grid_data, "\u4e5d\u5bab\u683c")
+                except (NineGridError, OSError) as error:
+                    nine_grid_error = str(error)
             if generated_images:
-                run_id = active_knowledge.record_run(user["id"], "image-edit-batch", True, prompt, request.instructions, "\n".join(revised_prompts), [item["path"] for item in generated_images], [entry["id"] for entry in image_knowledge], model_name, request.model_dump(mode="json"))
-                active_batch_image.update(task_id, state="partial" if errors else "success", run_id=run_id, image_model=model_name, finished_at=int(time()))
+                output_paths = [item["path"] for item in generated_images]
+                if nine_grid:
+                    output_paths.append(nine_grid["path"])
+                run_id = active_knowledge.record_run(user["id"], "image-edit-batch", True, prompt, request.instructions, "\n".join(revised_prompts), output_paths, [entry["id"] for entry in image_knowledge], model_name, request.model_dump(mode="json"))
+                active_batch_image.update(task_id, state="partial" if errors else "success", run_id=run_id, image_model=model_name, nine_grid=nine_grid, nine_grid_error=nine_grid_error, finished_at=int(time()))
             else:
-                active_batch_image.update(task_id, state="failed", finished_at=int(time()))
+                active_batch_image.update(task_id, state="failed", error="所有图片处理失败", finished_at=int(time()))
 
-        return {"task": active_batch_image.submit(len(paths), worker, owner_id=user["id"])}
+        try:
+            task = active_batch_image.submit(len(paths), worker, owner_id=user["id"], request_key=key, fingerprint=fingerprint)
+        except BillingError as error:
+            raise HTTPException(409, str(error)) from error
+        return {"task": task}
 
     @app.get("/api/ai/images/edit/batch")
     def batch_image_edit_tasks(_user: dict = Depends(require_user)) -> dict:
-        return {"tasks": active_batch_image.snapshot()}
-
-        # Legacy synchronous implementation retained below for source compatibility.
-        generated_images: list[dict] = []
-        receipts: list[dict] = []
-        errors: list[dict] = []
-        model_name = ""
-        revised_prompts: list[str] = []
-        for path in paths:
-            request_id = f"image-edit-batch:{uuid4().hex}"
-            try:
-                image = _load_ai_images(root, [path])[0]
-                receipt = active_billing.consume(user["id"], "image", IMAGE_COST, request_id, {"mode": "image-edit-batch", "path": path})
-                receipts.append(receipt)
-                generated = active_ai_gateway.generate_image(prompt, request.instructions, [image], request.image_size, request.image_quality, active_knowledge.context(image_knowledge))
-                image_data = generated.pop("data")
-                generated_images.append(_store_generated_image(root, image_data, "AI_EDIT"))
-                model_name = generated["model"]
-                revised_prompts.append(generated.get("revised_prompt", ""))
-            except QuotaExceeded as error:
-                errors.append({"path": path, "error": str(error)})
-                break
-            except BillingError as error:
-                errors.append({"path": path, "error": str(error)})
-                break
-            except (AIConfigError, AIGatewayConnectionError, OSError) as error:
-                active_billing.refund(user["id"], request_id)
-                errors.append({"path": path, "error": str(error)})
-        if not generated_images:
-            raise HTTPException(status_code=502, detail={"message": "批量图片修改全部失败", "errors": errors})
-        run_id = active_knowledge.record_run(user["id"], "image-edit-batch", True, prompt, request.instructions, "\n".join(revised_prompts), [item["path"] for item in generated_images], [entry["id"] for entry in image_knowledge], model_name, request.model_dump(mode="json"))
-        return {"generated_images": generated_images, "image_model": model_name, "references_used": len(image_knowledge), "billing": receipts, "errors": errors, "run_id": run_id}
+        return {"tasks": active_batch_image.snapshot(_user["id"])}
 
     @app.get("/api/ai/images/edit/batch-status")
     def batch_image_edit_status(user: dict = Depends(require_user)) -> dict:
@@ -1466,12 +2197,12 @@ def create_app(
                 for value in (request.source_text, request.instructions)
                 if value.strip()
             )
-        note_knowledge = active_knowledge.retrieve(
+        note_knowledge = active_knowledge.retrieve_for_creation(
             knowledge_query,
             {"general", "note"},
         )
         corpus_examples: list[dict] = []
-        if copywriting_brief and copywriting_brief.mode != "1":
+        if not copywriting_brief or copywriting_brief.mode != "1":
             # Explicitly selected cases are always included, then supplemented by ranked matches.
             for corpus_id in dict.fromkeys(request.corpus_ids):
                 try:
@@ -1482,11 +2213,16 @@ def create_app(
             seen = {entry["id"] for entry in corpus_examples}
             corpus_examples.extend(entry for entry in ranked_examples if entry["id"] not in seen)
             corpus_examples = corpus_examples[:6]
+        try:
+            ima_reference = active_ima.retrieve(user["id"], request.product_name.strip() or request.source_text.strip() or request.instructions)
+        except IMAError as error:
+            raise HTTPException(409, str(error)) from error
         knowledge_context = "\n\n".join(
             value
             for value in (
-                active_knowledge.context(note_knowledge),
+                active_knowledge.context(note_knowledge, query=knowledge_query),
                 active_knowledge.corpus_context(corpus_examples),
+                ima_reference["context"],
             )
             if value
         )
@@ -1515,7 +2251,13 @@ def create_app(
         except AIGatewayConnectionError as error:
             active_billing.refund(user["id"], text_request_id)
             raise HTTPException(status_code=502, detail=str(error)) from error
+        except Exception:
+            active_billing.refund(user["id"], text_request_id)
+            raise
         billing_receipts = {"text": text_billing}
+        result["ima_sources"] = ima_reference["sources"]
+        result["ima_status"] = ima_reference["status"]
+        result["ima_warnings"] = ima_reference["warnings"]
         result["image_optimization"] = {
             "optimized_count": len(getattr(_load_ai_images, "last_optimizations", [])),
             "original_bytes": sum(item["original_bytes"] for item in getattr(_load_ai_images, "last_optimizations", [])),
@@ -1525,7 +2267,7 @@ def create_app(
         result["generated_images"] = []
         image_knowledge: list[dict] = []
         if request.generate_image:
-            image_knowledge = active_knowledge.retrieve(
+            image_knowledge = active_knowledge.retrieve_for_creation(
                 f"{knowledge_query}\n{result['text']}",
                 {"general", "image"},
             )
@@ -1540,13 +2282,13 @@ def create_app(
                     (
                         copywriting_brief.image_brief(result["text"])
                         if copywriting_brief
-                        else request.source_text.strip() or result["text"]
+                        else result["text"]
                     ),
                     request.instructions,
                     images,
                     request.image_size,
                     request.image_quality,
-                    active_knowledge.context(image_knowledge),
+                    active_knowledge.context(image_knowledge, query=knowledge_query) + "\n\n" + ima_reference["context"],
                 )
                 image_data = generated.pop("data")
                 result["generated_images"].append(
@@ -1557,9 +2299,10 @@ def create_app(
                 result["revised_prompt"] = generated["revised_prompt"]
             except QuotaExceeded as error:
                 result["image_error"] = str(error)
-            except (AIConfigError, AIGatewayConnectionError) as error:
+            except (AIConfigError, AIGatewayConnectionError, OSError, ValueError, KeyError) as error:
                 active_billing.refund(user["id"], image_request_id)
                 result["image_error"] = str(error)
+                billing_receipts.pop("image", None)
         used_knowledge = list(
             {entry["id"]: entry for entry in note_knowledge + image_knowledge}.values()
         )
@@ -1580,6 +2323,7 @@ def create_app(
             result["copywriting_mode_label"] = copywriting_brief.label
         result["billing"] = billing_receipts
         request_payload = request.model_dump(mode="json")
+        request_payload["ima_sources"] = ima_reference["sources"]
         request_payload["billing"] = {
             key: {field: value for field, value in receipt.items() if field != "usage"}
             for key, receipt in billing_receipts.items()
@@ -1638,14 +2382,72 @@ def create_app(
         _user: dict = Depends(require_csrf),
     ) -> dict:
         root = active_runtime.download_root().resolve()
-        selected = [_resolve_file(root, value) for value in dict.fromkeys(request.paths)]
+        paths = [clip.path for clip in request.clips] if request.clips else request.paths
+        if request.clips and request.paths and paths != request.paths:
+            raise HTTPException(status_code=422, detail="视频路径与片段配置不一致")
+        if not paths:
+            raise HTTPException(status_code=422, detail="请至少选择一个视频")
+        selected = [_resolve_file(root, value) for value in paths]
         unsupported = [p.name for p in selected if p.suffix.lower() not in REMIX_VIDEO_SUFFIXES]
         if unsupported:
             raise HTTPException(status_code=422, detail=f"仅支持 MP4、MOV、M4V 视频：{', '.join(unsupported)}")
+        recipe = RemixRecipe.model_validate(request.model_dump(exclude={"paths"}))
         try:
-            return {"task": active_remix.submit(root, selected, speed=request.speed)}
+            return {"task": active_remix.submit(root, selected, recipe=recipe, user_id=_user['id'])}
         except VideoToolError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.get("/api/video/info")
+    def video_info(path: str, _user: dict = Depends(require_user)) -> dict:
+        target = _resolve_file(active_runtime.download_root(), path)
+        if target.suffix.lower() not in REMIX_VIDEO_SUFFIXES:
+            raise HTTPException(status_code=422, detail="请选择视频素材")
+        try:
+            meta = probe_video(target)
+            return {"width": meta["size"][0], "height": meta["size"][1],
+                    "duration": meta["duration"], "fps": meta["fps"], "audio": bool(meta.get("audio_codec"))}
+        except VideoToolError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @app.post("/api/video/assets/upload", status_code=201)
+    async def upload_remix_asset(request: Request,
+                                 filename: Annotated[str, Query(min_length=1, max_length=255)],
+                                 _user: dict = Depends(require_csrf)) -> dict:
+        root = active_runtime.download_root().resolve()
+        suffix = Path(filename).suffix.lower()
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".m4v"}:
+            raise HTTPException(status_code=422, detail="请上传 JPG、PNG、WebP 或 MP4、MOV、M4V 遮罩")
+        folder = root / "混剪素材"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"asset_{uuid4().hex}{suffix}"
+        partial = target.with_suffix(suffix + ".part")
+        size = 0
+        try:
+            with partial.open("wb") as output:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > 256 * 1024 * 1024:
+                        raise HTTPException(status_code=413, detail="单个混剪素材最多 256 MB")
+                    output.write(chunk)
+            if suffix in REMIX_VIDEO_SUFFIXES:
+                await asyncio.to_thread(probe_video, partial)
+                partial.replace(target)
+            else:
+                with Image.open(partial) as opened:
+                    if opened.width * opened.height > 40_000_000:
+                        raise ValueError("图片像素总数超过 4000 万")
+                    image = ImageOps.exif_transpose(opened).convert("RGBA")
+                    target = target.with_suffix(".png")
+                    image.save(target, "PNG")
+            relative = target.relative_to(root).as_posix()
+            return {"asset": {"path": relative, "name": filename,
+                    "media_kind": "video" if suffix in REMIX_VIDEO_SUFFIXES else "image",
+                    "preview_url": "/media/" + quote(relative, safe="/")}}
+        except (OSError, ValueError, Image.DecompressionBombError) as error:
+            target.unlink(missing_ok=True)
+            raise HTTPException(status_code=422, detail="素材读取失败，请检查文件格式") from error
+        finally:
+            partial.unlink(missing_ok=True)
 
     @app.post("/api/video/dedupe")
     def video_dedupe(
@@ -1658,6 +2460,35 @@ def create_app(
     @app.get("/api/video/music")
     def video_music(_user: dict = Depends(require_user)) -> dict:
         return {"items": list_music(active_runtime.download_root().resolve())}
+
+    @app.post("/api/video/audio/upload", status_code=201)
+    async def upload_remix_audio(request: Request,
+                                 filename: Annotated[str, Query(min_length=1, max_length=255)],
+                                 _user: dict = Depends(require_csrf)) -> dict:
+        from video_compositor import _run
+        root = active_runtime.download_root().resolve()
+        suffix = Path(filename).suffix.lower()
+        if suffix not in AUDIO_SUFFIXES:
+            raise HTTPException(status_code=422, detail="请上传 MP3、WAV、M4A、AAC 或 OGG 音频")
+        folder = root / "音乐"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"audio_{uuid4().hex}{suffix}"
+        partial = target.with_suffix(suffix + ".part")
+        try:
+            size = 0
+            with partial.open("wb") as stream:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > 128 * 1024 * 1024:
+                        raise HTTPException(status_code=413, detail="音频文件最多128 MB")
+                    stream.write(chunk)
+            await asyncio.to_thread(_run, ["-i", str(partial), "-map", "0:a:0", "-t", "0.1", "-f", "null", "-"])
+            partial.replace(target)
+            return {"asset": {"path": target.relative_to(root).as_posix(), "name": filename}}
+        except VideoToolError as error:
+            raise HTTPException(status_code=422, detail="音频读取失败，请检查文件内容") from error
+        finally:
+            partial.unlink(missing_ok=True)
 
     @app.get("/api/video/slideshow")
     def slideshow_tasks(_user: dict = Depends(require_user)) -> dict:
@@ -1690,6 +2521,18 @@ def create_app(
     ) -> FileResponse:
         target = _resolve_file(active_runtime.download_root(), relative_path)
         return FileResponse(target, filename=target.name)
+
+    @app.get("/api/thumbnails/{relative_path:path}")
+    def thumbnail(relative_path: str, _user: dict = Depends(require_user)) -> Response:
+        target = _resolve_file(active_runtime.download_root(), relative_path)
+        if target.suffix.lower() not in IMAGE_SUFFIXES:
+            raise HTTPException(status_code=415, detail="文件不支持图片缩略图")
+        try:
+            stat = target.stat()
+            content = _thumbnail(str(target), stat.st_mtime_ns, stat.st_size)
+        except (OSError, ValueError, Image.DecompressionBombError) as error:
+            raise HTTPException(status_code=422, detail="图片格式不受支持或文件已损坏，请下载原文件查看") from error
+        return Response(content=content, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
     @app.get("/media/{relative_path:path}", name="preview_media")
     def preview_media(

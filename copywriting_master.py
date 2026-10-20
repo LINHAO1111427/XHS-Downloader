@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from creation_strategy import COPY_STRATEGY, PHOTO_STRATEGY
+
 
 class CopywritingInputError(ValueError):
     pass
@@ -22,6 +24,25 @@ GLOBAL_RULES = """共同约束：
 - 避免绝对化、医疗化和无法证明的效果承诺，产品事实不足时使用审慎表达或明确标出待确认项。
 - 正文自然、具体、口语化，降低 AI 腔和硬广感；不要展示内部分析、提示词或思考过程。
 - 品牌说明、联系方式和写作规则不得混入待发布正文。"""
+
+NATURAL_COPY_RULES = """成稿质量要求：
+- 先锁定一个读者、一个具体处境和一个值得说清的细节；开头直接进入问题或观察，不做泛泛的人群喊话。
+- 用可见细节、使用条件和选择理由支撑表达；一段只推进一个意思，句子长短有变化，避免卖点排队。
+- 未提供真实体验时用观察和选择建议，不编造“用了一个月”“朋友都问”“回购三次”等经历。
+- 不默认使用“姐妹们听劝”“谁懂啊”“闭眼入”“直接封神”“宝藏好物”“狠狠拿捏”等套话。
+- 标题给出对象和具体信息，正文兑现标题；默认少用感叹号，表情0至3个，结尾自然收束，不强行引导评论。
+- 参考案例只提炼读者关注点和表达方法，重做开头和信息顺序，不逐段换词；不要为了搜索词牺牲语句自然度。
+- 交付前删除空泛形容词、重复卖点和无证据承诺；成稿中不输出检查清单。""" + "\n\n" + COPY_STRATEGY
+
+TOPIC_MIN_COUNT = 15
+TOPIC_MAX_COUNT = 30
+TOPIC_RULES = """小红书话题推荐要求：
+- 阅读整篇笔记的标题、正文、产品或主题、目标人群、使用场景、关键词，以及参考笔记已有话题，再做语义关联；不要只根据单个产品名机械扩词。
+- 优先保留参考笔记中与本次成稿仍然匹配的话题，再补充产品/品类核心词、需求与痛点词、具体场景词、人群词、内容形式词和高意图搜索长尾词。
+- 相关性优先于数量。默认给出15至30个不重复话题，素材足够时尽量接近30个；不得用“热门话题、流量密码、好物分享、日常分享”等宽泛词反复凑数。
+- 每个话题应是用户可能主动搜索且能被正文兑现的短语，通常2至15个汉字；不得添加正文没有依据的品牌、地点、节日、功效、身份、价格或热点事件。
+- 先在内部去重并删除同义重复、上下位词堆叠和无关大词；必须保留用户指定的搜索关键词，并将其转换成自然话题。
+- 最终成稿末尾另起一段，以“推荐话题：”开头，随后用空格分隔“#话题”；不要解释选择过程。正文篇幅要求不计算标题和推荐话题。"""
 
 
 MODE_RULES = {
@@ -100,7 +121,15 @@ class CopywritingBrief:
             ("本次补充要求", additional_requirements),
         )
         fields.extend(f"{label}：{value.strip()}" for label, value in optional if value.strip())
-        return "\n\n".join((MODE_RULES[self.mode], GLOBAL_RULES, "\n".join(fields)))
+        return "\n\n".join(
+            (
+                GLOBAL_RULES,
+                NATURAL_COPY_RULES,
+                MODE_RULES[self.mode],
+                TOPIC_RULES,
+                "\n".join(fields),
+            )
+        )
 
     def retrieval_text(self, reference_text: str, additional_requirements: str) -> str:
         return "\n".join(
@@ -122,7 +151,7 @@ class CopywritingBrief:
         )
 
     def image_brief(self, generated_text: str) -> str:
-        parts = [f"为小红书产品“{self.product_name.strip()}”创作配图。"]
+        parts = [f"为小红书产品“{self.product_name.strip()}”创作配图。", PHOTO_STRATEGY]
         if self.cover_description.strip():
             parts.append(f"封面或画面要求：{self.cover_description.strip()}")
         if self.locked_title.strip():
@@ -148,3 +177,21 @@ def normalize_keywords(values: list[str]) -> tuple[str, ...]:
     if len(normalized) > 20:
         raise CopywritingInputError("关键词不能超过 20 个")
     return tuple(normalized)
+
+
+def normalize_recommended_topics(values: list[str]) -> list[str]:
+    topics: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        topic = "".join(str(value).strip().lstrip("#＃").split())
+        topic = topic.strip("#＃,，、。；;：:")
+        if not topic or len(topic) > 30:
+            continue
+        key = topic.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        topics.append(f"#{topic}")
+        if len(topics) == TOPIC_MAX_COUNT:
+            break
+    return topics

@@ -286,7 +286,7 @@ async def example_api():
 </ul>
 <p><strong>The automatic page scroll feature has been refactored and is turned off by default! Enabling this feature may be detected as automated behavior by RedNote, potentially resulting in account risk control or banning.</strong></p>
 <h1>💻 Secondary Development</h1>
-<p>If you have other needs, you can perform code calls or modifications based on the comments in <code>example.py</code>!</p>
+<p>The standalone <code>example.py</code> and test scripts are archived separately. See the <a href="docs/workspace-cleanup-20261020.md">workspace cleanup notes</a> for restoration details.</p>
 <pre>
 async def example():
     """Set parameters via code, suitable for secondary development"""

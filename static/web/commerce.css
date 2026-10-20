@@ -1,0 +1,23 @@
+.commerce-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:16px 0}
+.commerce-toolbar>input{flex:1;min-width:180px}
+.commerce-toolbar span,.commerce-browser p{color:var(--text-secondary,#686b75);font-size:13px;line-height:1.7}
+.commerce-task-list{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px}
+.commerce-task-list button{max-width:360px;white-space:normal;text-align:left}
+.commerce-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+.commerce-fields>*,.commerce-variant>*,.commerce-browser-layout>*{min-width:0}
+#commerceEditor input:not([type=checkbox]){width:100%;min-width:0}
+.product-tabs{flex-wrap:wrap}
+#commerceEditor input,#commerceEditor textarea,.commerce-browser input,.commerce-browser select{border:1px solid #ddd;border-radius:8px;padding:10px;max-width:100%;background:#fff;color:#252530}
+#commerceEditor pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;background:#f7f7f9;padding:14px;border-radius:10px;font-size:12px}
+.commerce-assets{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0 22px}
+.commerce-asset{width:106px;display:grid;gap:5px;font-size:12px}
+.commerce-asset img,.commerce-asset video{width:100px;height:100px;object-fit:contain;border:1px solid #eee;border-radius:8px}
+.commerce-variant{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;margin:8px 0}
+.commerce-browser{width:min(1500px,96vw);max-width:96vw;max-height:94vh;overflow:auto;border:0;border-radius:16px;padding:22px}
+.commerce-browser::backdrop{background:#0008}
+.commerce-browser-layout{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:20px}
+#commerceBrowserImage{display:block;width:100%;min-height:100px;background:#f5f5f7;border:1px solid #ddd;cursor:crosshair;touch-action:none}
+#commerceFieldMap label{display:grid;gap:6px;margin:12px 0;font-size:13px}
+.commerce-browser aside button{margin:6px 0;white-space:normal}
+.commerce-browser[aria-busy="true"] #commerceBrowserImage{pointer-events:none;opacity:.7}
+@media(max-width:800px){.commerce-fields,.commerce-browser-layout{grid-template-columns:minmax(0,1fr)}.commerce-browser{padding:12px}.commerce-variant{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.commerce-task-list button{max-width:100%}}

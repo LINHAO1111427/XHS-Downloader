@@ -4,6 +4,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot ".install\docker-mode.json")) {
+    & docker compose -f (Join-Path $PSScriptRoot "deploy\compose.personal.yml") stop app
+    if ($LASTEXITCODE -ne 0) { throw "Docker application stop failed." }
+    Write-Output "XHS-Downloader Docker stopped. Persistent data retained."
+    exit 0
+}
 $pidFile = Join-Path $PSScriptRoot ".install\web-server.pid"
 
 if (-not (Test-Path -LiteralPath $pidFile)) {

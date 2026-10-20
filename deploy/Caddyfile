@@ -1,0 +1,19 @@
+{$XHS_PUBLIC_HOST} {
+    encode zstd gzip
+    request_body {
+        max_size 130MB
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy same-origin
+    }
+    reverse_proxy app:8000 {
+        # The upstream listener is private; only this proxy supplies the IP.
+        header_up X-Forwarded-For {remote_host}
+        transport http {
+            response_header_timeout 330s
+        }
+    }
+}

@@ -4,9 +4,11 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
+from server_limits import limited_media
 from threading import Lock
 from time import time
 from uuid import uuid4
+from task_journal import TaskJournal
 
 import imageio_ffmpeg
 from PIL import Image, ImageFilter, ImageOps
@@ -128,6 +130,9 @@ def _enhance_video(source: Path, output: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+
+
+@limited_media
 def enhance_media(source: Path) -> Path:
     suffix = source.suffix.lower()
     if suffix not in SUPPORTED_MEDIA_SUFFIXES:
@@ -141,14 +146,20 @@ def enhance_media(source: Path) -> Path:
 
 
 class EnhancementManager:
-    def __init__(self, max_workers: int = 1, *, delete_image_sources: bool = True) -> None:
+    def __init__(self, max_workers: int = 1, *, delete_image_sources: bool = True, state_path: Path | None = None) -> None:
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="media-enhancer",
         )
         self._lock = Lock()
-        self._tasks: dict[str, dict] = {}
+        self._journal = TaskJournal(state_path)
+        self._tasks = self._journal.load()
         self.delete_image_sources = delete_image_sources
+
+    def recover(self):
+        if self._journal.path is not None:
+            with self._lock:
+                self._tasks = self._journal.recover()
 
     def submit(self, root: Path, sources: list[Path]) -> dict:
         task_id = uuid4().hex
@@ -167,6 +178,7 @@ class EnhancementManager:
             "deleted_sources": [],
         }
         with self._lock:
+            self._journal.add(task, self._tasks)
             self._tasks[task_id] = task
         self._executor.submit(self._run, task_id, root, sources)
         return deepcopy(task)
@@ -183,7 +195,9 @@ class EnhancementManager:
 
     def _update(self, task_id: str, **changes: object) -> None:
         with self._lock:
-            self._tasks[task_id].update(changes)
+            task = {**self._tasks[task_id], **changes}
+            self._journal.save(task)
+            self._tasks[task_id] = task
 
     def _run(self, task_id: str, root: Path, sources: list[Path]) -> None:
         self._update(task_id, state="processing", started_at=int(time()))
@@ -196,6 +210,7 @@ class EnhancementManager:
                     self._tasks[task_id]["outputs"].append(
                         output.relative_to(root).as_posix()
                     )
+                    self._journal.save(self._tasks[task_id])
                 # Local cleanup is intentional for enlarged image copies; retain video originals.
                 if self.delete_image_sources and source.suffix.lower() in IMAGE_SUFFIXES:
                     source.unlink(missing_ok=True)
@@ -221,3 +236,4 @@ class EnhancementManager:
                 current="",
                 finished_at=int(time()),
             )
+            self._journal.save(task)

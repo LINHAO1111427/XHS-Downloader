@@ -1,0 +1,2 @@
+# Dynamic Xiaohongshu merchandise pages; Windows uses installed Microsoft Edge.
+playwright>=1.62.0,<2

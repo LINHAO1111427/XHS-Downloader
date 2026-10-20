@@ -6,7 +6,11 @@
     <meta name="theme-color" content="#d9273e">
     <title>小红书素材下载</title>
     <link rel="icon" href="/assets/logo.png">
-    <link rel="stylesheet" href="/assets/styles.css">
+    <link rel="stylesheet" href="/assets/styles.css?v=20260917-platform-products">
+    <link rel="stylesheet" href="/assets/account-factory.css?v=20260922-content-alignment">
+    <link rel="stylesheet" href="/assets/discovery.css?v=20260921-1">
+    <link rel="stylesheet" href="/assets/discovery-board.css?v=20261006-overview">
+    <link rel="stylesheet" href="/assets/commerce.css?v=20260929-1">
 </head>
 <body>
 <section class="auth-view" id="authView" aria-labelledby="authTitle">
@@ -40,6 +44,8 @@
             </div>
             <nav class="primary-nav" aria-label="主功能">
                 <button class="nav-item active" type="button" data-route="download"><i data-lucide="download"></i><span>下载</span><b id="navTaskCount" hidden></b></button>
+                <button class="nav-item" type="button" data-route="operations"><i data-lucide="layout-dashboard"></i><span>小红书运营</span></button>
+                <button class="nav-item" type="button" data-route="products"><i data-lucide="package"></i><span>商品素材</span></button>
                 <button class="nav-item" type="button" data-route="viral"><i data-lucide="chart-no-axes-combined"></i><span>低粉爆款</span></button>
                 <button class="nav-item" type="button" data-route="collect"><i data-lucide="radar"></i><span>采集</span></button>
                 <button class="nav-item" type="button" data-route="ai"><i data-lucide="sparkles"></i><span>AI 创作</span></button>
@@ -57,7 +63,8 @@
                     <button class="icon-button" id="adminUsersButton" type="button" title="用户管理" aria-label="用户管理" hidden><i data-lucide="users"></i></button>
                     <button class="icon-button" id="aiSettingsButton" type="button" title="AI 中转设置" aria-label="AI 中转设置" hidden><i data-lucide="bot"></i></button>
                     <button class="icon-button" id="knowledgeButton" type="button" title="本地知识库" aria-label="本地知识库" hidden><i data-lucide="book-open"></i></button>
-                    <button class="icon-button" id="settingsButton" type="button" title="Cookie 设置" aria-label="Cookie 设置" hidden><i data-lucide="settings-2"></i></button>
+                    <button class="icon-button" id="imaSettingsButton" type="button" title="连接 IMA 知识库" aria-label="连接 IMA 知识库"><i data-lucide="cloud"></i></button>
+                    <button class="icon-button" id="settingsButton" type="button" title="小红书扫码登录" aria-label="小红书扫码登录" hidden><i data-lucide="qr-code"></i></button>
                     <button class="icon-button" id="openFolderButton" type="button" title="打开下载目录" aria-label="打开下载目录" hidden><i data-lucide="folder-open"></i></button>
                     <button class="account-button" id="accountButton" type="button" title="账号中心" aria-label="账号中心"><span id="accountInitial">用</span></button>
                 </div>
@@ -75,23 +82,35 @@
                     </div>
 
                     <section class="workspace-panel download-composer" aria-labelledby="inputTitle">
-                        <div class="section-heading"><div><h2 id="inputTitle">新建下载</h2><p>支持笔记链接与分享文本</p></div></div>
+                        <div class="section-heading"><div><h2 id="inputTitle">从一篇对标开始</h2><p>粘贴笔记链接，采集素材或直接生成新图文</p></div></div>
                         <label class="url-field" for="urlInput"><span>笔记链接</span><textarea id="urlInput" rows="3" placeholder="粘贴小红书笔记链接或包含链接的分享文本" autocomplete="off"></textarea></label>
                         <div class="input-actions">
                             <div class="secondary-actions"><button class="button secondary" id="pasteButton" type="button"><i data-lucide="clipboard-paste"></i>粘贴</button><button class="icon-button subtle" id="clearInputButton" type="button" title="清空链接" aria-label="清空链接"><i data-lucide="x"></i></button></div>
                             <button class="button primary" id="downloadButton" type="button"><i data-lucide="download"></i>开始下载</button>
                         </div>
+                        <div class="rewrite-options">
+                            <label class="select-field" for="rewriteStyle"><span>图片方向</span><select id="rewriteStyle"><option value="natural">自然随拍 · 生活感</option><option value="detail">细节特写 · 看清产品</option><option value="scene">场景重构 · 换个角度</option></select></label>
+                            <label class="select-field" for="rewriteArticleCount"><span>生成篇数</span><select id="rewriteArticleCount"><option value="1">1 篇</option><option value="3">3 篇</option><option value="10" selected>10 篇</option></select></label>
+                            <label class="select-field" for="rewriteCount"><span>生成配图</span><select id="rewriteCount"><option value="1">1 张封面</option><option value="3">3 张图文组</option><option value="6" selected>6 张图文组</option></select></label>
+                            <button class="button primary" id="rewriteNoteButton" type="button"><i data-lucide="sparkles"></i>一键改写图文</button>
+                        </div>
+                        <p class="rewrite-hint">默认生成 10 篇 × 每篇 6 图，共享已采集产品图；逐篇结合已采集爆款正文重构，保持产品外观一致。</p>
+                        <details class="rewrite-brief"><summary>补充你的产品和读者（可选，写过会在本机记住）</summary>
+                            <label class="url-field" for="rewriteFacts"><span>真实产品资料</span><textarea id="rewriteFacts" rows="3" maxlength="4000" placeholder="补充产品名称、可确认的材质和用途，以及你自己的真实体验；请使用与参考图相同的产品"></textarea></label>
+                            <label class="text-field" for="rewriteAudience"><span>写给谁看</span><input id="rewriteAudience" maxlength="1000" placeholder="例如：每天带电脑通勤的上班族"></label>
+                            <label class="url-field" for="rewriteInstructions"><span>这次想怎么写</span><textarea id="rewriteInstructions" rows="2" maxlength="2000" placeholder="例如：少用感叹号，写清收纳细节，不要硬广"></textarea></label>
+                        </details>
+                    </section>
+
+                    <section class="workspace-panel rewrite-workspace" aria-labelledby="rewriteHeading">
+                        <div class="section-heading"><div><h2 id="rewriteHeading">一键图文</h2><p id="rewriteSummary" role="status">提交后在这里查看文案和配图，刷新页面可继续查看</p></div><div class="rewrite-heading-actions"><button class="icon-button subtle" id="rewriteExportSettings" type="button" title="设置图文下载目录" aria-label="设置图文下载目录" hidden><i data-lucide="folder-cog"></i></button><button class="button secondary" id="refreshRewrites" type="button">刷新</button></div></div>
+                        <label class="text-field rewrite-search" for="rewriteSearch"><span>查找文章</span><input id="rewriteSearch" type="search" placeholder="搜索标题、产品或场景"></label>
+                        <div id="rewriteResults" class="rewrite-results"></div>
                     </section>
 
                     <section class="content-section" aria-labelledby="taskTitle">
                         <div class="section-heading"><div><h2 id="taskTitle">下载任务</h2><p id="taskSummary">暂无任务</p></div><button class="icon-button subtle" id="clearTasksButton" type="button" title="清理已结束任务" aria-label="清理已结束任务"><i data-lucide="list-x"></i></button></div>
                         <div class="task-list" id="taskList" aria-live="polite"><div class="empty-state"><i data-lucide="inbox"></i><span>暂无下载任务</span></div></div>
-                    </section>
-
-                    <section class="content-section alibaba-section" aria-labelledby="alibabaTitle">
-                        <div class="section-heading"><div><h2 id="alibabaTitle">1688 商品采集</h2><p id="alibabaSummary">粘贴公开商品链接，或按关键词打开搜索采集</p></div><a class="button secondary" id="alibabaExport" href="/api/1688/export.csv"><i data-lucide="sheet"></i>导出 CSV</a></div>
-                        <div class="alibaba-inputs"><label class="url-field" for="alibabaUrls"><span>商品链接或分享文案（每行一个）</span><textarea id="alibabaUrls" rows="3" placeholder="可直接粘贴手机阿里分享文案、短链或商品详情链接"></textarea></label><label class="text-field" for="alibabaKeyword"><span>搜索关键词（可选）</span><input id="alibabaKeyword" type="text" maxlength="200" placeholder="例如：女装 连衣裙"></label><button class="button primary" id="alibabaCollect" type="button"><i data-lucide="package-search"></i>开始采集</button></div>
-                        <div class="alibaba-grid" id="alibabaProducts"><div class="empty-state"><i data-lucide="package-open"></i><span>暂无商品</span></div></div><p class="collector-note">仅采集公开页面信息，请遵守 1688 平台规则和适用法律。</p>
                     </section>
 
                     <section class="content-section library-section" aria-labelledby="libraryTitle">
@@ -107,11 +126,178 @@
                     </section>
                 </section>
 
+                <section class="page-panel" data-page="operations" aria-labelledby="operationsPageTitle" hidden>
+                    <div class="page-heading operation-heading">
+                        <div><span class="page-kicker">XHS OPERATIONS</span><h1 id="operationsPageTitle">小红书运营</h1><p>选择账号，在独立工作区管理发布内容、参考资料与创作计划</p></div>
+                        <div class="operation-heading-actions"><span class="visual-context" id="operationBaseKnowledge"><i data-lucide="database"></i>基础知识库读取中</span><button class="button primary" id="operationNewSpace" type="button"><i data-lucide="plus"></i>创建运营账号</button></div>
+                    </div>
+
+                    <div class="operation-layout">
+                        <aside class="workspace-panel operation-space-pane">
+                            <div class="operation-pane-title"><strong>运营账号</strong><span id="operationSpaceCount">0 个</span></div>
+                            <div id="operationSpaceList" class="operation-space-list"><div class="empty-state"><i data-lucide="layout-dashboard"></i><span>还没有账号空间</span></div></div>
+                        </aside>
+
+                        <div class="operation-main">
+                            <section class="workspace-panel operation-empty" id="operationEmpty">
+                                <i data-lucide="layers-3"></i><h2>先创建第一个小红书运营账号</h2><p>这里只建立运营档案，不会关联或登录真实小红书账号。每个运营账号都有自己独立的对标、商品和内容生成池。</p><button class="button primary" id="operationEmptyCreate" type="button">创建运营账号</button>
+                            </section>
+
+                            <div id="operationDetail" hidden>
+                                <header class="operation-workspace-header"><div><span class="operation-workspace-label">当前运营账号</span><h2 id="operationWorkspaceName">账号空间</h2><p id="operationWorkspaceAccount"></p></div><span class="operation-workspace-badge">独立账号工作区</span></header>
+                                <div class="operation-workspace-tabs" role="tablist" aria-label="账号工作区">
+                                    <button class="active" id="operationTab-factory" type="button" role="tab" data-operation-tab="factory" aria-controls="accountFactory" aria-selected="true"><i data-lucide="layout-dashboard"></i>内容工作台</button>
+                                    <button id="operationTab-benchmarks" type="button" role="tab" data-operation-tab="benchmarks" aria-selected="false"><i data-lucide="scan-search"></i>对标研究</button>
+                                    <button id="operationTab-products" type="button" role="tab" data-operation-tab="products" aria-selected="false"><i data-lucide="package-open"></i>商品资料</button>
+                                    <button id="operationTab-generate" type="button" role="tab" data-operation-tab="generate" aria-selected="false"><i data-lucide="sparkles"></i>手动创作</button>
+                                    <button id="operationTab-profile" type="button" role="tab" data-operation-tab="profile" aria-selected="false"><i data-lucide="settings-2"></i>账号设置</button>
+                                </div>
+                                <section class="workspace-panel operation-profile-panel operation-tab-panel" data-operation-panel="profile" hidden>
+                                    <div class="section-heading"><div><h2 id="operationSpaceTitle">账号空间</h2><p id="operationSpaceMeta">配置账号定位后再建立对标资产池</p></div><button class="button danger subtle" id="operationDeleteSpace" type="button"><i data-lucide="trash-2"></i>删除空间</button></div>
+                                    <form id="operationSpaceSettings" class="operation-settings-grid">
+                                        <label class="text-field"><span>运营账号名称</span><input id="operationSpaceName" maxlength="80" required></label>
+                                        <label class="text-field"><span>计划使用的昵称</span><input id="operationAccountName" maxlength="80" placeholder="例如：桌面美学研究所（可稍后修改）"></label>
+                                        <label class="url-field"><span>主要卖货方向 / 账号定位</span><textarea id="operationPositioning" rows="2" maxlength="2000" placeholder="例如：平价桌面收纳；以租房、工位真实场景种草"></textarea></label>
+                                        <label class="url-field"><span>目标人群</span><textarea id="operationAudience" rows="2" maxlength="1000" placeholder="可先留空，添加对标后点“从对标自动分析”"></textarea></label>
+                                        <label class="url-field"><span>语言与画面调性</span><textarea id="operationTone" rows="2" maxlength="1000" placeholder="例如：素人日常、克制口语、暖色自然光、少广告感"></textarea></label>
+                                        <label class="text-field operation-wide"><span>账号关键词</span><input id="operationKeywords" maxlength="500" placeholder="用逗号分隔，例如：桌面收纳，通勤好物，租房生活"></label>
+                                        <div class="operation-wide operation-profile-actions"><span id="operationAnalyzeState">添加对标资料后，可自动归纳卖货方向、受众与调性</span><button class="button secondary" id="operationAnalyzeProfile" type="button"><i data-lucide="scan-search"></i>从对标自动分析</button><button class="button primary" type="submit"><i data-lucide="save"></i>保存账号信息</button></div>
+                                    </form>
+                                    <div class="operation-layers" aria-label="知识分层">
+                                        <span><b>01</b><small>系统底层</small><strong>基础知识库</strong></span><i data-lucide="arrow-right"></i>
+                                        <span><b>02</b><small>账号专属</small><strong>对标 + 商品池</strong></span><i data-lucide="arrow-right"></i>
+                                        <span><b>03</b><small>持续沉淀</small><strong>图文 + 视频池</strong></span>
+                                    </div>
+                                </section>
+
+                                <section id="accountFactory" class="workspace-panel factory-panel operation-tab-panel active" data-operation-panel="factory" aria-label="账号每日内容工厂"></section>
+                                <section class="operation-tab-panel" data-operation-panel="benchmarks" hidden>
+                                    <div class="operation-two-column">
+                                        <section class="workspace-panel operation-card">
+                                            <div class="section-heading"><div><h2>增加对标账号</h2><p>抓取公开笔记并按粉丝 ≤10万、互动 ≥300、互动粉丝比 ≥5%筛选低粉爆款，同时提取挂载商品</p></div><span class="count-pill" id="operationAccountCount">0</span></div>
+                                            <form id="operationAccountForm" class="operation-compact-form">
+                                                <label class="text-field"><span>小红书主页链接</span><input id="operationBenchmarkUrl" maxlength="2048" required placeholder="https://www.xiaohongshu.com/user/profile/..."></label>
+                                                <label class="text-field"><span>备注名</span><input id="operationBenchmarkName" maxlength="100" placeholder="这个账号为什么值得对标"></label>
+                                                <button class="button primary" type="submit"><i data-lucide="user-round-plus"></i>添加并抓取</button>
+                                            </form>
+                                            <div id="operationAccountList" class="operation-record-list"></div>
+                                        </section>
+
+                                        <section class="workspace-panel operation-card">
+                                            <div class="section-heading"><div><h2>增加指定爆款笔记</h2><p>只需粘贴链接，系统会抓取正文、图片、结构数据与笔记挂载商品；也可继续搜索同品低粉爆款</p></div><span class="count-pill" id="operationNoteCount">0</span></div>
+                                            <form id="operationNoteForm" class="operation-compact-form">
+                                                <label class="text-field"><span>对标笔记链接</span><input id="operationNoteUrl" maxlength="5000" required placeholder="粘贴一篇必须参考的小红书笔记"></label>
+                                                <button class="button primary" type="submit"><i data-lucide="bookmark-plus"></i>抓取并加入</button>
+                                            </form>
+                                            <div class="operation-discovery-bar"><label class="text-field"><span>同品关键词</span><input id="operationDiscoveryKeywords" maxlength="250" placeholder="留空则使用商品/账号关键词"></label><button class="button secondary" id="operationDiscover" type="button"><i data-lucide="radar"></i>找同品爆款</button><span id="operationDiscoveryState"></span></div>
+                                            <div id="operationNoteList" class="operation-record-list operation-note-list"></div>
+                                        </section>
+                                    </div>
+                                </section>
+
+                                <section class="operation-tab-panel" data-operation-panel="products" hidden>
+                                    <section class="workspace-panel operation-card">
+                                        <div class="section-heading"><div><h2>账号商品池</h2><p>从已采集的 1688 / 小红书商品素材导入，原图会复制进当前账号空间并作为生成主体</p></div><span class="count-pill" id="operationProductCount">0</span></div>
+                                        <form id="operationProductImportForm" class="operation-import-row">
+                                            <label class="select-field"><span>已采集商品</span><select id="operationCollectedProduct"><option value="">正在读取商品素材库</option></select></label>
+                                            <label class="text-field"><span>补充商品卡</span><input id="operationImportedSellingPoints" maxlength="4000" placeholder="材质/成分、用途、真实卖点、痛点与场景；不确定的不要写"></label>
+                                            <button class="button primary" type="submit"><i data-lucide="folder-input"></i>导入当前空间</button>
+                                        </form>
+                                        <details class="operation-manual-product"><summary>没有现成素材？手动建立商品卡</summary>
+                                            <form id="operationProductManualForm" class="operation-settings-grid">
+                                                <label class="text-field"><span>商品名称</span><input id="operationManualProductName" maxlength="300" required></label>
+                                                <label class="text-field"><span>商品链接</span><input id="operationManualProductUrl" maxlength="2048"></label>
+                                                <label class="url-field"><span>材质 / 成分 / 规格 / 用途</span><textarea id="operationManualProductDescription" rows="3" maxlength="4000"></textarea></label>
+                                                <label class="url-field"><span>真实卖点、痛点与场景</span><textarea id="operationManualProductSelling" rows="3" maxlength="4000"></textarea></label>
+                                                <div class="operation-wide operation-form-actions"><button class="button secondary" type="submit">保存商品卡</button></div>
+                                            </form>
+                                        </details>
+                                        <div id="operationProductList" class="operation-product-grid"></div>
+                                    </section>
+                                </section>
+
+                                <section class="operation-tab-panel" data-operation-panel="generate" hidden>
+                                    <div class="operation-two-column generate-columns">
+                                        <section class="workspace-panel operation-card">
+                                            <div class="section-heading"><div><h2>一键撰写对标笔记</h2><p>选择商品和本次对标样本，在同一处完成图文改写、视频脚本与商品素材混剪</p></div></div>
+                                            <form id="operationGenerateForm" class="operation-generate-form">
+                                                <label class="select-field"><span>当前商品</span><select id="operationGenerateProduct" required><option value="">请先建立商品池</option></select></label>
+                                                <label class="select-field"><span>文案策略</span><select id="operationCopywritingMode"><option value="2">2. 同品创新（推荐）</option><option value="3">3. 跨产品迁移</option><option value="4">4. 定题真人种草</option><option value="5">5. 约180字三段式素人</option></select></label>
+                                                <fieldset class="protocol-field"><legend>内容类型</legend><div class="segmented-control"><label><input type="radio" name="operationContentType" value="graphic" checked><span>一键图文改写</span></label><label><input type="radio" name="operationContentType" value="video"><span>一键视频混剪</span></label></div></fieldset>
+                                                <div class="operation-generate-options"><label class="select-field"><span>生成篇数</span><select id="operationArticleCount"><option value="1">1 篇</option><option value="3">3 篇</option><option value="10">10 篇</option></select></label><label class="select-field"><span>每篇配图</span><select id="operationImageCount"><option value="3">3 张</option><option value="6" selected>6 张</option></select></label><label class="select-field"><span>图片方向</span><select id="operationImageStyle"><option value="natural">自然随拍</option><option value="detail">细节特写</option><option value="scene">场景重构</option></select></label></div>
+                                                <fieldset class="operation-reference-picker"><legend>本次对标笔记（至少 1 篇）</legend><div id="operationReferencePicker"></div></fieldset>
+                                                <label class="url-field"><span>本次补充要求</span><textarea id="operationGenerateInstructions" rows="3" maxlength="2000" placeholder="只写本次特殊要求；账号定位、商品资料和所选对标会自动带入"></textarea></label>
+                                                <button class="button primary operation-generate-button" type="submit"><i data-lucide="sparkles"></i>开始生成</button>
+                                            </form>
+                                        </section>
+                                        <section class="workspace-panel operation-card">
+                                            <div class="section-heading"><div><h2>生成池</h2><p>图文保留文案和配图；视频输出脚本分镜，并用商品视频混剪或商品图生成竖版初稿</p></div><span class="count-pill" id="operationGenerationCount">0</span></div>
+                                            <div id="operationGenerationList" class="operation-generation-list"></div>
+                                        </section>
+                                    </div>
+                                </section>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="page-panel" data-page="products" aria-labelledby="productsPageTitle" hidden>
+                    <div class="page-heading"><div><span class="page-kicker">PRODUCT LIBRARY</span><h1 id="productsPageTitle">商品素材</h1><p>商品资料与原图集中保存，选好图片即可复制、下载或 AI 优化</p></div></div>
+                    <div class="view-tabs product-tabs" role="tablist" aria-label="商品平台"><button type="button" role="tab" data-product-tab="1688" aria-selected="true" class="active"><i data-lucide="package"></i>1688 商品</button><button type="button" role="tab" data-product-tab="xhs" aria-selected="false"><i data-lucide="shopping-bag"></i>小红书商品</button><button type="button" role="tab" data-product-tab="listing" aria-selected="false">小红书上品</button></div>
+                    <section class="workspace-panel product-panel" data-product-panel="1688" aria-labelledby="alibabaTitle">
+                        <div class="section-heading"><div><h2 id="alibabaTitle">1688 商品采集</h2><p id="alibabaSummary">商品信息和原图一并保存，采集后可预览、复制和优化</p></div><a class="button secondary" id="alibabaExport" href="/api/1688/export.csv"><i data-lucide="sheet"></i>导出 CSV</a></div>
+                        <div class="alibaba-inputs"><label class="url-field" for="alibabaUrls"><span>商品链接或分享文案（每行一个）</span><textarea id="alibabaUrls" rows="3" placeholder="可直接粘贴手机阿里分享文案、短链或商品详情链接"></textarea></label><label class="text-field" for="alibabaKeyword"><span>搜索关键词（可选）</span><input id="alibabaKeyword" type="text" maxlength="200" placeholder="例如：女装 连衣裙"></label><button class="button primary" id="alibabaCollect" type="button"><i data-lucide="package-search"></i>开始采集</button></div>
+                        <div class="collector-errors" id="alibabaErrors" role="status" hidden></div>
+                        <div class="commerce-toolbar"><button type="button" class="button secondary" id="commerceOpen1688">登录网页采集</button><span>网页加载商品后，可保存当前商品的主图、详情图、规格图和视频。</span></div>
+                        <div class="alibaba-grid" id="alibabaProducts"><div class="empty-state"><i data-lucide="package-open"></i><span>暂无商品</span></div></div>
+                    </section>
+
+                    <section class="workspace-panel product-panel" data-product-panel="xhs" hidden aria-labelledby="xhsProductTitle">
+                        <div class="section-heading"><div><h2 id="xhsProductTitle">小红书商品采集</h2><p id="xhsProductSummary">直接读取商品详情页，保存商品信息和图片</p></div></div>
+                        <div class="alibaba-inputs"><label class="url-field" for="xhsProductUrl"><span>小红书商品详情链接或商品分享文案</span><textarea id="xhsProductUrl" rows="2" placeholder="从小红书商品详情页复制分享链接粘贴到这里"></textarea></label><button class="button primary" id="xhsProductCollect" type="button"><i data-lucide="shopping-bag"></i>采集商品和图片</button></div>
+                        <div class="collector-errors" id="xhsProductErrors" role="status" hidden></div><div class="alibaba-grid" id="xhsProducts"><div class="empty-state"><i data-lucide="package-open"></i><span>暂无商品信息</span></div></div>
+                    </section>
+
+                    <section class="workspace-panel product-panel" data-product-panel="listing" hidden aria-labelledby="listingTitle">
+                        <div class="section-heading"><div><h2 id="listingTitle">小红书上品</h2><p>从 1688 商品卡片创建任务，编辑售价与素材，在千帆网页逐项填写并核对结果。</p></div><button type="button" class="button secondary" id="commerceReload">刷新任务</button></div>
+                        <div id="commerceTaskList" class="commerce-task-list"></div>
+                        <form id="commerceEditor" hidden>
+                            <div class="commerce-fields">
+                                <label class="text-field">商品标题<input name="title" required maxlength="300"></label>
+                                <label class="text-field">目标店铺名称<input name="shop_name" maxlength="150" placeholder="填写后，上品前核对网页店铺名称"></label>
+                                <label class="text-field">售价（元）<input name="sale_price" inputmode="decimal" placeholder="填写实际售价"></label>
+                                <label class="text-field">库存<input name="stock" inputmode="numeric" placeholder="填写实际可售库存"></label>
+                                <label class="text-field">类目路径<input name="category" maxlength="300" placeholder="在千帆网页选择对应类目"></label>
+                                <label class="text-field">运费模板<input name="freight_template" maxlength="150" placeholder="在千帆网页选择现有模板"></label>
+                            </div>
+                            <details><summary>源商品资料与 SKU 规格</summary><pre id="commerceSource"></pre><button type="button" class="button secondary" id="commerceUseSkus">将源规格加入任务</button></details>
+                            <div id="commerceVariants"></div>
+                            <label class="text-field">上品备注<textarea name="notes" maxlength="5000" rows="2"></textarea></label>
+                            <div id="commerceAssets"></div>
+                            <p id="commerceTaskStatus" role="status"></p>
+                            <div class="commerce-toolbar"><button type="submit" class="button primary">保存上品任务</button><button type="button" class="button secondary" id="commerceRefreshAssets">同步补齐后的素材</button><a id="commercePackage" class="button secondary" download>下载上品包</a><button type="button" class="button primary" id="commerceOpenXhs">打开千帆上品网页</button></div>
+                            <details><summary>执行记录</summary><a id="commerceEvidence" target="_blank" rel="noopener" hidden>查看最近执行截图</a><pre id="commerceHistory"></pre></details>
+                        </form>
+                    </section>
+                </section>
+
                 <section class="page-panel" data-page="viral" aria-labelledby="viralTitle">
                     <div class="page-heading">
-                        <div><span class="page-kicker">RANKING</span><h1 id="viralTitle">低粉爆款</h1><p>按互动效率筛选的采集结果</p></div>
-                        <div class="viral-actions"><a class="button secondary" id="viralExport" hidden><i data-lucide="file-down"></i>导出 CSV</a><button class="icon-button" id="viralRefresh" type="button" title="刷新榜单" aria-label="刷新榜单"><i data-lucide="refresh-cw"></i></button></div>
+                        <div><span class="page-kicker">RANKING</span><h1 id="viralTitle">低粉爆款</h1><p>通过 Edge 打开小红书官方页面，模拟正常搜索、滚动和查看笔记，再筛选低粉爆款与真实挂载商品</p></div>
+                        <div class="viral-actions"><button class="button primary" id="viralCollectNow" type="button"><i data-lucide="radar"></i>立即采集</button><button class="button secondary" id="viralLogin" type="button" hidden><i data-lucide="qr-code"></i>重新扫码登录</button><a class="button secondary" id="viralExport" hidden><i data-lucide="file-down"></i>导出 CSV</a><button class="icon-button" id="viralRefresh" type="button" title="刷新榜单" aria-label="刷新榜单"><i data-lucide="refresh-cw"></i></button></div>
                     </div>
+                    <p class="viral-run-rules">查看跨批次保存的账号与商品：<a href="#collect" id="viralDiscoveryOverview">打开采集结果总览 →</a></p>
+                    <section class="workspace-panel viral-product-panel" aria-labelledby="viralProductTitle">
+                        <div class="section-heading"><div><h2 id="viralProductTitle">今日低粉带货商品 Top 10</h2><p id="viralProductStatus" role="status">正在读取今日平台采集结果</p></div><span class="visual-context"><i data-lucide="monitor"></i>Edge 页面采集</span></div>
+                        <div id="viralPlatformProducts" class="viral-platform-products"></div>
+                        <p id="viralProductMethod" class="viral-run-rules"></p>
+                    </section>
+                    <section class="workspace-panel viral-recommend-panel" aria-labelledby="viralRecommendTitle">
+                        <div class="section-heading"><div><h2 id="viralRecommendTitle">今日低粉爆款笔记 Top 10</h2><p id="viralRecommendStatus" role="status">正在读取今日推荐</p></div></div>
+                        <p id="viralNextRun" class="viral-run-rules"></p>
+                        <div id="viralRecommendations" class="viral-recommendations"></div>
+                        <p id="viralRecommendMethod" class="viral-run-rules"></p>
+                    </section>
                     <section class="workspace-panel viral-ranking-panel">
                         <div class="viral-results-toolbar"><label class="select-field viral-history"><span class="visually-hidden">采集批次</span><select id="viralHistory" aria-label="采集批次"><option value="">暂无采集记录</option></select></label><span id="viralSummary"></span></div>
                         <p id="viralRunRules" class="viral-run-rules"></p>
@@ -125,12 +311,70 @@
                         <div><span class="page-kicker">COLLECT</span><h1 id="collectTitle">采集</h1><p id="viralStatus" role="status">正在读取采集状态</p></div>
                         <button class="button secondary compact-command" id="viralCancel" type="button" hidden><i data-lucide="square"></i>停止采集</button>
                     </div>
+                    <section id="discoveryBoard" class="discovery-board" aria-label="采集结果总览"></section>
+                    <section class="workspace-panel discovery-panel" aria-labelledby="discoveryTitle">
+                        <div class="section-heading"><div><h2 id="discoveryTitle">多平台选品线索</h2><p>小红书 MCP · 抖音 DouK｜采集正文、互动与评论，保存每次观察结果</p></div><button class="button secondary" id="discoveryRefresh" type="button">刷新记录</button></div>
+                        <section aria-labelledby="discoveryDailyTitle" class="discovery-plan">
+                            <h3 id="discoveryDailyTitle">每日自动选品</h3>
+                            <p>每天先检索本地知识库和账号资料，再采集近两天挂商品的低粉图文笔记，保留筛选依据与数据缺口。</p>
+                            <form id="discoveryDailyForm"><fieldset id="discoveryDailyControls">
+                                <div class="discovery-filters">
+                                    <label><input id="discoveryDailyEnabled" type="checkbox"> 启用每天自动选品</label>
+                                    <label class="text-field"><span>北京时间</span><input id="discoveryDailyAt" type="time" value="09:00" required></label>
+                                    <label class="text-field"><span>选品方向（逗号分隔，最多6个）</span><input id="discoveryDailyKeywords" maxlength="605" required></label>
+                                    <label class="text-field"><span>每个方向每种排序采集上限</span><input id="discoveryDailyLimit" type="number" min="1" max="20" value="10" required></label>
+                                    <label class="text-field"><span>已取得互动合计门槛</span><input id="discoveryDailyMinimum" type="number" min="0" max="100000000" value="500" required></label>
+                                </div>
+                                <p id="discoveryDailyRules">默认近两天、粉丝严格少于1000、必须有明确挂载商品且仅图文；互动门槛可调整，商品加购、销量和利润单独核验。</p>
+                                <div class="discovery-actions"><button class="button primary" type="submit">保存每日计划</button><button id="discoveryDailyQuickRun" class="button primary" type="button">一键抓取近48小时挂商品低粉图文</button><button id="discoveryDailyRun" class="button secondary" type="button">执行今日计划</button><button id="discoveryDailyResume" class="button secondary" type="button" hidden>处理登录后继续</button></div>
+                            </fieldset></form>
+                            <p id="discoveryDailyStatus" role="status">正在读取每日计划</p>
+                            <label class="select-field"><span>选品日报</span><select id="discoveryDailyHistory"><option value="">暂无日报</option></select></label>
+                            <p id="discoveryDailySummary"></p><div id="discoveryDailyResults" class="discovery-results"></div>
+                        </section>
+                        <details id="discoveryConnections"><summary>数据源连接与登录</summary>
+                            <div class="discovery-connections">
+                                <fieldset id="discoveryXhsControls"><legend>小红书 MCP</legend><p>此入口使用独立登录状态。扫码完成后点击“检查连接”。</p><div class="discovery-actions"><button class="button secondary" id="discoveryStartMcp" type="button">启动服务</button><button class="button secondary" id="discoveryCheckMcp" type="button">检查连接</button><button class="button secondary" id="discoveryQrMcp" type="button">扫码登录</button></div><p id="discoveryMcpStatus" role="status">尚未检查连接</p><img id="discoveryQr" alt="使用小红书 App 扫码登录" hidden></fieldset>
+                                <fieldset id="discoveryDyControls"><legend>抖音 DouK</legend><p>使用已登录抖音网页的 Cookie；保存后输入框会清空。</p><label class="url-field"><span>抖音 Cookie</span><textarea id="discoveryDyCookie" rows="3" maxlength="20000" autocomplete="off" spellcheck="false" placeholder="粘贴浏览器请求头中的 Cookie"></textarea></label><button class="button secondary" id="discoverySaveCookie" type="button">保存 Cookie</button><p id="discoveryDyStatus" role="status">正在读取配置状态</p></fieldset>
+                            </div>
+                        </details>
+                        <form id="discoveryForm"><fieldset id="discoveryControls">
+                            <div class="discovery-filters discovery-selection-inputs">
+                                <label class="select-field"><span>选品账号（可选）</span><select id="discoverySpace"><option value="">不关联账号</option></select></label>
+                                <label class="select-field"><span>当前商品（可选）</span><select id="discoveryProductId"><option value="">自行填写方向</option></select></label>
+                                <label class="text-field"><span>同款 / 商品词</span><input id="discoveryProduct" maxlength="100" placeholder="如：拼豆笔"></label>
+                                <label class="text-field"><span>同类 / 类目</span><input id="discoveryCategory" maxlength="100" placeholder="如：拼豆工具"></label>
+                                <label class="text-field"><span>同需求 / 痛点</span><input id="discoveryNeed" maxlength="100" placeholder="如：大面积铺豆"></label>
+                                <label class="text-field"><span>使用场景</span><input id="discoveryScene" maxlength="100" placeholder="如：手工DIY"></label>
+                                <label class="select-field"><span>笔记筛选条件</span><select id="discoveryPreset"><option value="recent">近期低粉：7天、粉丝&lt;1000</option><option value="today">今日低粉高赞：粉丝&lt;1000、点赞≥500</option><option value="broad">广选：先保留线索</option></select></label>
+                                <label class="text-field"><span>24h加购须严格大于（待核验）</span><input id="discoveryCartMin" type="number" min="0" max="100000000" value="200" required></label>
+                            </div>
+                            <div class="discovery-filters">
+                                <label class="select-field"><span>数据源</span><select id="discoveryPlatform"><option value="xiaohongshu">小红书 · MCP</option><option value="douyin">抖音 · DouK</option></select></label>
+                                <label class="select-field"><span>采集方式</span><select id="discoveryMode"><option value="search">关键词搜索</option><option value="detail">指定作品链接</option><option value="hot">抖音热榜</option></select></label>
+                                <label class="text-field discovery-query"><span id="discoveryQueryLabel">搜索关键词</span><input id="discoveryQuery" maxlength="4096" placeholder="例如：拼豆工具" required></label>
+                                <label class="select-field"><span>排序</span><select id="discoverySort"><option value="latest">最新发布</option><option value="popular">最多点赞</option><option value="general">综合</option></select></label>
+                                <label class="select-field"><span>发布时间</span><select id="discoveryDays"><option value="7">近一周</option><option value="1">近一天</option><option value="180">近半年</option><option value="0">不限</option></select></label>
+                                <label class="text-field"><span>作品 / 热词上限</span><input id="discoveryLimit" type="number" min="1" max="30" value="10" required></label>
+                                <label class="text-field"><span>每篇评论上限</span><input id="discoveryComments" type="number" min="0" max="30" value="10" required></label>
+                                <label class="text-field"><span>抖音搜索页数</span><input id="discoveryPages" type="number" min="1" max="3" value="1" required></label>
+                            </div>
+                            <div class="discovery-actions"><button class="button secondary" id="discoveryPreview" type="button">查看本次选品计划</button><button class="button primary" id="discoveryCollect" type="submit">按选品思路采集</button><button class="button secondary" id="discoveryCancel" type="button" hidden>停止采集</button><span id="discoveryStatus" role="status">正在读取采集记录</span></div>
+                            <div id="discoveryPlanPreview" class="discovery-plan" hidden></div>
+                        </fieldset></form>
+                        <p class="viral-run-rules">结果是选品候选样本，互动与热度不代表销量。未取得的字段显示“未取得”；评论仅展示实际采集到的样本。</p>
+                        <div class="discovery-history"><label class="select-field"><span>历史批次</span><select id="discoveryHistory"><option value="">暂无记录</option></select></label><a class="button secondary" id="discoveryExport" hidden>导出完整 CSV</a></div>
+                        <p id="discoveryRunSummary" role="status"></p><details id="discoveryRunPlan" hidden><summary>本批选品依据与知识来源</summary><div id="discoveryPlanSnapshot" class="discovery-plan"></div></details>
+                        <label class="select-field"><span>查看筛选结果（保留全部原始样本）</span><select id="discoveryStage"><option value="">全部</option><option value="review">优先核验</option><option value="observe">继续观察</option><option value="missing">数据待补</option><option value="filtered">未达笔记条件</option><option value="inspiration">热词灵感</option></select></label>
+                        <div id="discoveryErrors" class="viral-errors" hidden></div><div id="discoveryResults" class="discovery-results"></div>
+                    </section>
                     <section class="workspace-panel collect-panel">
                         <div class="section-heading"><div><h2>采集规则</h2><p>关键词与低粉爆款筛选条件</p></div></div>
                         <form id="viralForm" class="viral-form"><fieldset id="viralControls">
                             <div class="viral-filter-grid"><label class="text-field viral-keywords"><span>关键词</span><input id="viralKeywords" type="text" maxlength="254" value="家居" placeholder="家居，收纳，厨房" required></label><label class="select-field"><span>发布时间</span><select id="viralHours"><option value="today">今日（北京时间）</option><option value="24" selected>近 24 小时</option><option value="48">近 48 小时</option><option value="72">近 3 天</option><option value="168">近 7 天</option></select></label><label class="text-field"><span>粉丝上限</span><input id="viralFollowers" type="number" min="0" max="1000000" step="1" value="50000" required></label><label class="text-field"><span>点赞下限</span><input id="viralLikes" type="number" min="0" max="100000000" step="1" value="0" required></label></div>
                             <details class="viral-advanced"><summary>更多筛选条件</summary><div class="viral-settings-grid"><label class="text-field"><span>总互动下限</span><input id="viralInteractions" type="number" min="0" max="100000000" step="1" value="500" required></label><label class="text-field"><span>互动 / 粉丝下限</span><input id="viralRatio" type="number" min="0" max="100000" step="0.01" value="0.1" required></label><label class="text-field"><span>每关键词页数</span><input id="viralPages" type="number" min="1" max="3" value="1" required></label><label class="text-field"><span>核验笔记上限</span><input id="viralCandidates" type="number" min="1" max="100" value="60" required></label><label class="text-field"><span>榜单条数</span><input id="viralLimit" type="number" min="1" max="100" value="30" required></label></div></details>
                             <div class="viral-schedule-row"><label class="check-field"><input id="viralDaily" type="checkbox">每日定时</label><label class="text-field viral-time"><span class="visually-hidden">执行时间（北京时间）</span><input id="viralTime" type="time" value="09:00" required aria-label="执行时间（北京时间）"></label><span class="viral-timezone">北京时间</span><button class="button secondary" id="viralSave" type="button"><i data-lucide="save"></i>保存规则</button><button class="button primary" id="viralCollect" type="submit"><i data-lucide="radar"></i>立即采集</button></div>
+                            <p class="viral-run-rules">每日推荐会自动从采集结果生成。电脑和工作台后台需保持运行；当天错过时间会在启动后补采一次。建议使用近 24–48 小时，覆盖昨晚发布的笔记。</p>
                         </fieldset></form>
                     </section>
                 </section>
@@ -158,8 +402,8 @@
                     <section class="ai-view" data-ai-panel="image" role="tabpanel" hidden>
                         <div class="workspace-panel image-editor">
                             <div class="image-editor-controls">
-                                <div class="pane-heading"><div><h2>AI 图片修改</h2><p id="aiImageEditState">正在读取图片模型</p></div><span class="selection-count" id="aiEditSelectionCount">0 / 4</span></div>
-                                <div><div class="field-label-row"><span>选择已下载图片</span><button class="text-action" id="clearAIEditSelection" type="button">清空</button></div><div class="image-picker" id="aiEditImagePicker"></div></div>
+                                <div class="pane-heading"><div><h2>AI 图片修改</h2><p id="aiImageEditState">正在读取图片模型</p></div><span class="selection-count" id="aiEditSelectionCount">0 / 12</span></div>
+                                <div class="ai-edit-image-source"><div class="field-label-row"><span>参考图片（已下载或本地上传）</span><button class="text-action" id="clearAIEditSelection" type="button">清空</button></div><div class="ai-edit-upload-row"><button class="button secondary ai-edit-upload-button" id="aiEditUploadButton" type="button"><i data-lucide="upload"></i><span id="aiEditUploadLabel">上传本地图片</span></button><span class="ai-edit-upload-hint" id="aiEditUploadHint">支持 JPG、PNG、WebP，可多选或拖到下方区域</span><input class="visually-hidden" id="aiEditUploadInput" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple></div><div class="image-picker" id="aiEditImagePicker" aria-label="参考图片选择区"></div></div>
                                 <label class="url-field" for="aiEditPrompt"><span>修改目标</span><textarea id="aiEditPrompt" rows="4" maxlength="4000" placeholder="例如：保留产品主体，改成明亮的居家场景，移除画面文字" required></textarea></label>
                                 <label class="url-field" for="aiEditInstructions"><span>补充要求</span><textarea id="aiEditInstructions" class="compact-textarea" rows="3" maxlength="4000" placeholder="构图、色彩、光线和禁止出现的元素"></textarea></label>
                                 <div class="ai-image-options always-visible"><label class="select-field" for="aiEditSize"><span>输出比例</span><select id="aiEditSize"><option value="1024x1024">方图 1:1</option><option value="1024x1536" selected>竖图 2:3</option><option value="1536x1024">横图 3:2</option></select></label><label class="select-field" for="aiEditQuality"><span>图片质量</span><select id="aiEditQuality"><option value="low">标准</option><option value="medium" selected>精细</option><option value="high">高清</option></select></label></div>
@@ -243,10 +487,19 @@
     <div class="dialog-shell">
         <div class="dialog-heading"><div><h2>用户管理</h2><p id="userSummary">正在读取用户</p></div><button class="icon-button subtle dialog-close" type="button" aria-label="关闭"><i data-lucide="x"></i></button></div>
         <label class="setting-row" for="registrationEnabled"><span><strong>开放注册</strong><small>允许新用户创建账号</small></span><input id="registrationEnabled" type="checkbox" role="switch"></label>
+        <form id="createUserForm" class="account-form">
+            <h3>开通试用账号</h3>
+            <label>邮箱<input name="email" type="email" required autocomplete="off" maxlength="254"></label>
+            <label>昵称<input name="display_name" required minlength="2" maxlength="40" autocomplete="off"></label>
+            <label>初始密码<input name="password" type="password" required minlength="10" maxlength="128" autocomplete="new-password" placeholder="至少 10 位，包含字母和数字"></label>
+            <p>开通后请用户在账号设置中修改密码。关闭开放注册时，也可以由管理员开通账号。</p>
+            <button class="button primary" type="submit">开通账号</button>
+        </form>
         <div class="user-list" id="userList"></div>
     </div>
 </dialog>
 
+<dialog id="discoveryNoteDialog"><div class="dialog-shell"><div class="dialog-heading"><div><h2 id="discoveryNoteTitle"></h2><p id="discoveryNoteMeta"></p></div><button class="icon-button subtle" id="discoveryNoteClose" type="button" aria-label="关闭采集详情">×</button></div><p class="viral-note-body" id="discoveryNoteBody"></p><p id="discoveryCommentScope"></p><ul id="discoveryNoteComments"></ul><div class="dialog-actions"><button class="button secondary" id="discoveryCopy" type="button">复制标题与完整正文</button><a class="button secondary" id="discoveryNoteLink" target="_blank" rel="noopener noreferrer">查看平台原文</a></div></div></dialog>
 <dialog id="viralNoteDialog">
     <div class="dialog-shell">
         <div class="dialog-heading"><div><h2 id="viralNoteTitle"></h2><p id="viralNoteMeta"></p></div><button class="icon-button subtle" id="viralNoteClose" type="button" title="关闭笔记" aria-label="关闭笔记"><i data-lucide="x"></i></button></div>
@@ -274,15 +527,36 @@
             <label class="search-field"><i data-lucide="search"></i><input id="knowledgeSearch" type="search" placeholder="搜索知识"></label>
             <label class="select-field compact-select" for="knowledgeFilter"><span class="visually-hidden">筛选类型</span><select id="knowledgeFilter"><option value="">全部类型</option><option value="general">通用策略</option><option value="note">笔记策略</option><option value="image">图片策略</option></select></label>
         </div>
+        <div class="knowledge-import">
+            <label class="button secondary" for="knowledgeImportFile">导入 IMA / 知识文档<input id="knowledgeImportFile" type="file" accept=".txt,.md,.json" hidden></label>
+            <p id="knowledgeImportStatus" role="status">支持 TXT、Markdown、JSON，单份 1 MB。按上方知识类型导入，自动分段和去重；导入后参与文案与配图检索。</p>
+            <p>在线读取 IMA：点击顶部云朵按钮，填写官方凭证并选择知识库。</p>
+        </div>
         <div class="knowledge-list" id="knowledgeList"></div>
     </div>
 </dialog>
 
 <dialog id="settingsDialog">
     <form method="dialog" class="dialog-shell" id="cookieForm">
-        <div class="dialog-heading"><div><h2>Cookie 设置</h2><p id="cookieState">未配置</p></div><button class="icon-button subtle" value="cancel" aria-label="关闭"><i data-lucide="x"></i></button></div>
-        <label class="url-field" for="cookieInput"><span>小红书网页 Cookie</span><textarea id="cookieInput" rows="5" placeholder="粘贴 Cookie；留空并保存可清除" autocomplete="off"></textarea></label>
-        <div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button class="button primary" id="saveCookieButton" type="submit"><i data-lucide="save"></i>保存</button></div>
+        <div class="dialog-heading"><div><h2>小红书登录</h2><p id="cookieState">未配置</p></div><button class="icon-button subtle" value="cancel" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="xhs-login-box">
+            <p>点击后将在运行本项目的电脑上打开小红书官方窗口。使用小红书 App 扫码并确认，登录状态会自动保存，供下载和每日采集使用。</p>
+            <div class="dialog-actions"><button class="button primary" id="xhsScanLogin" type="button"><i data-lucide="qr-code"></i>小红书扫码登录</button><button class="button secondary" id="xhsCancelLogin" type="button" hidden>取消登录</button></div>
+            <p id="xhsLoginStatus" role="status" aria-live="polite">无需手动复制 Cookie</p>
+        </div>
+        <details class="xhs-manual-cookie"><summary>手动填写 Cookie（高级）</summary>
+            <label class="url-field" for="cookieInput"><span>小红书网页 Cookie</span><textarea id="cookieInput" rows="5" placeholder="粘贴 Cookie；留空并保存可清除" autocomplete="off"></textarea></label>
+            <button class="button secondary" id="saveCookieButton" type="submit"><i data-lucide="save"></i>手动保存</button>
+        </details>
+        <div class="dialog-actions"><button class="button secondary" value="cancel">关闭</button></div>
+    </form>
+</dialog>
+
+<dialog id="rewriteExportDialog">
+    <form class="dialog-shell compact" id="rewriteExportForm">
+        <div class="dialog-heading"><div><h2>图文下载目录</h2><p id="rewriteExportDirectoryState">正在读取</p></div><button class="icon-button subtle dialog-close" type="button" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <label class="text-field" for="rewriteExportDirectory"><span>绝对路径</span><input id="rewriteExportDirectory" type="text" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="D:\小红书图文" required></label>
+        <div class="dialog-actions"><button class="button secondary dialog-close" type="button">取消</button><button class="button primary" id="saveRewriteExportDirectory" type="submit"><i data-lucide="save"></i>保存目录</button></div>
     </form>
 </dialog>
 
@@ -290,12 +564,13 @@
     <form method="dialog" class="dialog-shell" id="aiSettingsForm">
         <div class="dialog-heading"><div><h2>AI 中转设置</h2><p id="aiConfigState">正在读取</p></div><button class="icon-button subtle" value="cancel" aria-label="关闭"><i data-lucide="x"></i></button></div>
         <div class="form-grid">
-            <label class="text-field" for="aiBaseUrl"><span>中转 Base URL</span><input id="aiBaseUrl" type="url" inputmode="url" placeholder="https://api.example.com/v1" autocomplete="url" required></label>
-            <fieldset class="protocol-field"><legend>API 协议</legend><div class="segmented-control"><label><input type="radio" name="aiProtocol" value="responses" checked><span>Responses</span></label><label><input type="radio" name="aiProtocol" value="chat_completions"><span>Chat Completions</span></label></div></fieldset>
-            <label class="text-field" for="aiApiKey"><span>API Key</span><div class="secret-field"><input id="aiApiKey" type="password" placeholder="留空保留已保存的密钥" autocomplete="new-password"><button class="icon-button subtle" id="toggleAIKeyButton" type="button" title="显示或隐藏 API Key" aria-label="显示或隐藏 API Key"><i data-lucide="eye"></i></button></div></label>
+            <label class="text-field" for="aiBaseUrl"><span>文案中转 Base URL</span><input id="aiBaseUrl" type="url" inputmode="url" placeholder="http://127.0.0.1:8088/v1" autocomplete="url" required></label>
+            <fieldset class="protocol-field"><legend>文案 API 协议</legend><div class="segmented-control"><label><input type="radio" name="aiProtocol" value="responses" checked><span>Responses</span></label><label><input type="radio" name="aiProtocol" value="chat_completions"><span>Chat Completions</span></label></div></fieldset>
+            <label class="text-field" for="aiApiKey"><span>文案 API Key</span><div class="secret-field"><input id="aiApiKey" type="password" placeholder="留空保留已保存的密钥" autocomplete="new-password"><button class="icon-button subtle" id="toggleAIKeyButton" type="button" title="显示或隐藏 API Key" aria-label="显示或隐藏 API Key"><i data-lucide="eye"></i></button></div></label>
             <label class="check-field"><input id="clearAIKey" type="checkbox">清除已保存的 API Key</label>
-            <label class="text-field" for="aiModel"><span>默认模型</span><input id="aiModel" type="text" placeholder="例如 gpt-4o-mini" autocomplete="off" required></label>
-            <label class="text-field" for="aiImageModel"><span>图片模型</span><input id="aiImageModel" type="text" placeholder="例如 gpt-image-2" autocomplete="off"></label>
+            <label class="text-field" for="aiModel"><span>文案模型</span><input id="aiModel" type="text" placeholder="例如 gpt-4o-mini" autocomplete="off" required></label>
+            <label class="text-field" for="aiImageBaseUrl"><span>图片中转 Base URL</span><input id="aiImageBaseUrl" type="url" inputmode="url" placeholder="http://127.0.0.1:8088/v1" autocomplete="url" readonly><small>生图与改图固定使用本地中转，不跟随文案的远程线路。</small></label>
+            <label class="text-field" for="aiImageModel"><span>图片模型</span><input id="aiImageModel" type="text" placeholder="例如 gpt-image-2" autocomplete="off"><small>所有生图入口共用此本地图片线路。</small></label>
         </div>
         <div class="dialog-actions"><button class="button secondary" id="testAIButton" type="button"><i data-lucide="activity"></i>测试连接</button><button class="button primary" id="saveAIButton" type="submit"><i data-lucide="save"></i>保存配置</button></div>
     </form>
@@ -316,7 +591,7 @@
 <dialog id="mediaViewerDialog" class="media-viewer-dialog">
     <div class="media-viewer-shell">
         <div class="media-viewer-heading"><div><h2 id="mediaViewerTitle">媒体预览</h2><p id="mediaViewerMeta"></p></div><div><a class="icon-button" id="mediaViewerDownload" href="#" title="下载当前文件" aria-label="下载当前文件"><i data-lucide="download"></i></a><button class="icon-button" id="closeMediaViewerButton" type="button" title="关闭预览" aria-label="关闭预览"><i data-lucide="x"></i></button></div></div>
-        <div class="media-stage" id="mediaStage"><button class="viewer-nav previous" id="previousMediaButton" type="button" title="上一个媒体" aria-label="上一个媒体"><i data-lucide="chevron-left"></i></button><img id="mediaViewerImage" alt="" hidden><video id="mediaViewerVideo" controls playsinline hidden></video><button class="viewer-nav next" id="nextMediaButton" type="button" title="下一个媒体" aria-label="下一个媒体"><i data-lucide="chevron-right"></i></button></div>
+        <div class="product-viewer-actions"><button class="button secondary" id="copyViewerImage" type="button" hidden><i data-lucide="copy"></i>复制图片</button><button class="button secondary" id="optimizeViewerImage" type="button" hidden><i data-lucide="wand-sparkles"></i>AI 去水印 / 优化</button><span id="productViewerPosition"></span></div><div class="media-stage" id="mediaStage"><button class="viewer-nav previous" id="previousMediaButton" type="button" title="上一个媒体" aria-label="上一个媒体"><i data-lucide="chevron-left"></i></button><img id="mediaViewerImage" alt="" hidden><video id="mediaViewerVideo" controls playsinline hidden></video><button class="viewer-nav next" id="nextMediaButton" type="button" title="下一个媒体" aria-label="下一个媒体"><i data-lucide="chevron-right"></i></button></div>
     </div>
 </dialog>
 
@@ -328,14 +603,84 @@
     </form>
 </dialog>
 
+<dialog id="operationSpaceDialog" class="dialog operation-space-dialog">
+    <form id="operationCreateSpaceForm" class="dialog-shell compact">
+        <div class="dialog-heading"><div><span class="page-kicker">OPERATION ACCOUNT</span><h2>创建小红书运营账号</h2><p>只创建系统内的运营档案，不需要绑定或登录真实小红书账号</p></div><button class="icon-button subtle" id="operationCloseSpaceDialog" type="button" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <label class="text-field"><span>运营账号名称</span><input id="operationCreateName" maxlength="80" required placeholder="例如：家居号 · 桌面收纳"></label>
+        <label class="text-field"><span>计划使用的昵称</span><input id="operationCreateAccountName" maxlength="80" placeholder="例如：桌面美学研究所（可稍后修改）"></label>
+        <label class="url-field"><span>主要卖货方向</span><textarea id="operationCreatePositioning" rows="3" maxlength="2000" placeholder="例如：平价桌面收纳；不知道可先简单填写，之后由对标资料自动分析"></textarea></label>
+        <label class="url-field"><span>初步目标人群</span><textarea id="operationCreateAudience" rows="2" maxlength="1000" placeholder="可留空，添加对标账号和笔记后自动分析"></textarea></label>
+        <div class="dialog-actions"><button class="button secondary" id="operationCancelSpace" type="button">取消</button><button class="button primary" type="submit">创建运营账号</button></div>
+    </form>
+</dialog>
+
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<script src="/assets/lucide.min.js"></script>
-<script src="/assets/app.js"></script>
-<script src="/assets/viral.js"></script>
+<button class="button secondary danger" id="deleteSelectedButton" type="button" disabled><i data-lucide="trash-2"></i>批量删除</button>
+<script src="/assets/lucide.min.js" defer></script>
+<dialog id="imaDialog" class="knowledge-dialog">
+    <div class="dialog-shell">
+        <div class="dialog-heading"><div><h2>连接 IMA 知识库</h2><p>为当前账号的文案和一键图文提供参考</p></div><button class="icon-button subtle dialog-close" type="button" aria-label="关闭 IMA 设置"><i data-lucide="x"></i></button></div>
+        <p class="ima-help">在 <a href="https://ima.qq.com/agent-interface" target="_blank" rel="noopener noreferrer">腾讯官方凭证页面</a> 登录并获取 Client ID 与 API Key，粘贴到下面。连接按本项目账号保存，密钥不会发给生成模型。</p>
+        <form id="imaCredentialsForm" class="ima-form">
+            <label class="text-field" for="imaClientId"><span>Client ID</span><input id="imaClientId" maxlength="1024" autocomplete="off" placeholder="填写官方页面提供的 Client ID"></label>
+            <label class="text-field" for="imaApiKey"><span>API Key</span><input id="imaApiKey" type="password" maxlength="8000" autocomplete="new-password" placeholder="首次填写；已保存时留空即可"></label>
+            <button class="button primary" type="submit" id="imaConnect">保存凭证并读取知识库</button>
+        </form>
+        <p id="imaStatus" class="ima-help" role="status">尚未配置</p>
+        <div class="ima-search-row"><input id="imaLibrarySearch" type="search" placeholder="按名称查找知识库" aria-label="知识库名称"><button class="button secondary" id="imaSearchLibraries" type="button">查找</button></div>
+        <div id="imaLibraries" class="ima-libraries"></div>
+        <button class="button secondary" id="imaMoreLibraries" type="button" hidden>加载更多知识库</button>
+        <form id="imaSelectionForm" class="ima-form">
+            <label class="text-field" for="imaSearchTerms"><span>常用检索词（可选）</span><input id="imaSearchTerms" maxlength="200" placeholder="例如：小红书文案，封面优化；留空按本次主题检索"></label>
+            <label class="check-field"><input id="imaEnabled" type="checkbox">生成文案和一键图文前，自动检索选中的知识库</label>
+            <p class="ima-help">最多选择 3 个库。返回资料按搜索片段或笔记原文标注，较长内容会节选；参考内容会交给你配置的文案与图片模型。</p>
+            <button class="button primary" type="submit" id="imaSaveSelection">保存选择</button>
+        </form>
+        <div class="ima-search-row"><input id="imaPreviewQuery" maxlength="500" placeholder="输入主题，试查实际参考内容" aria-label="试查主题"><button class="button secondary" id="imaPreviewButton" type="button">试查</button></div>
+        <div id="imaPreviewResult" class="ima-preview"></div>
+        <button class="button secondary" id="imaDisconnect" type="button">断开并清除本地凭证</button>
+    </div>
+</dialog>
+<script src="/assets/app.js?v=20260929-commerce" defer></script>
+<script src="/assets/commerce.js?v=20260929-1" defer></script>
+<script src="/assets/operations.js?v=20260922-workspace-layout" defer></script>
+<script src="/assets/account-factory.js?v=20261012-trial-images-1" defer></script>
+<script src="/assets/remix.js?v=20260918-audio-subtitles" defer></script>
+<script src="/assets/viral.js?v=20260917-browser-collector-2" defer></script>
+<script src="/assets/discovery-board.js?v=20261006-overview" defer></script>
+<script src="/assets/discovery.js?v=20261006-overview" defer></script>
+<script src="/assets/rewrite.js?v=20260916-ten-article-viral" defer></script>
+<script src="/assets/ima.js?v=20260916-1" defer></script>
+<script src="/assets/xhs-login.js?v=20260916-1" defer></script>
 <button class="button live-photo" id="livePhotoButton" type="button" disabled hidden>生成实况</button>
 <button class="button live-photo" id="generatedImageLivePhoto" type="button" disabled hidden>生成实况</button>
 <div class="enhancement-strip live-photo-strip" id="livePhotoPanel" hidden><div class="enhancement-copy"><strong id="livePhotoTitle">实况素材</strong><span id="livePhotoDetail"></span></div><span class="state-pill" id="livePhotoState"></span></div>
-<dialog id="livePhotoDialog" class="live-photo-dialog"><form class="dialog-shell" id="livePhotoForm"><div class="dialog-heading"><div><h2>生成实况素材</h2><p id="livePhotoMeta"></p></div><button class="icon-button subtle dialog-close" type="button">关闭</button></div><div class="live-photo-editor"><div class="live-photo-preview"><img id="livePhotoImage" alt="" hidden><video id="livePhotoVideo" controls muted playsinline hidden></video></div><div class="live-photo-controls"><label class="range-field" id="liveStartField" for="liveStartRange"><span>起始时间 <output id="liveStartValue">0.0 秒</output></span><input id="liveStartRange" type="range" min="0" max="0" step="0.1" value="0"></label><label class="range-field" for="liveDurationRange"><span>实况时长 <output id="liveDurationValue">3.0 秒</output></span><input id="liveDurationRange" type="range" min="0.5" max="5" step="0.1" value="3"></label></div></div><div class="dialog-actions"><button class="button secondary dialog-close" type="button">取消</button><button class="button primary" id="createLivePhotoButton" type="submit">开始生成</button></div></form></dialog>
+<dialog id="livePhotoDialog" class="live-photo-dialog">
+    <form class="dialog-shell" id="livePhotoForm">
+        <div class="dialog-heading">
+            <div><h2>生成实况视频（MOV）</h2><p id="livePhotoMeta"></p></div>
+            <button class="icon-button subtle dialog-close" type="button" aria-label="关闭"><i data-lucide="x"></i></button>
+        </div>
+        <div class="live-photo-editor">
+            <div class="live-photo-preview"><img id="livePhotoImage" alt="" hidden><video id="livePhotoVideo" controls muted playsinline hidden></video></div>
+            <div class="live-photo-controls">
+                <label class="text-field" id="liveMotionModeField" for="liveMotionMode"><span>动效模式</span><select id="liveMotionMode"><option value="camera">??????</option><option value="ai_object">AI 物品运动（LTX）</option></select></label>
+                <label class="text-field" id="liveMotionPromptField" for="liveMotionPrompt" hidden><span>动作描述</span><textarea id="liveMotionPrompt" rows="4" maxlength="1000" placeholder="摆件轻轻向右旋转并摇摆，背景和镜头保持固定"></textarea></label>
+                <label class="range-field" id="liveStartField" for="liveStartRange"><span>起始时间 <output id="liveStartValue">0.0 秒</output></span><input id="liveStartRange" type="range" min="0" max="0" step="0.1" value="0"></label>
+                <label class="range-field" for="liveDurationRange"><span>实况时长 <output id="liveDurationValue">2.0 秒</output></span><input id="liveDurationRange" type="range" min="0.5" max="5" step="0.1" value="2"></label>
+            </div>
+        </div>
+        <div class="dialog-actions"><button class="button secondary dialog-close" type="button">取消</button><button class="button primary" id="createLivePhotoButton" type="submit">开始生成 MOV</button></div>
+    </form>
+</dialog>
+<dialog id="commerceBrowserDialog" class="commerce-browser">
+    <div class="section-heading"><h2 id="commerceBrowserTitle">商品网页</h2><button type="button" class="button secondary" id="commerceHideBrowser">收起预览</button></div>
+    <div class="commerce-toolbar"><input id="commerceBrowserUrl" type="url" aria-label="商品网页地址" placeholder="输入商品详情或千帆后台地址"><button type="button" class="button secondary" id="commerceGo">打开地址</button><button type="button" class="button secondary" id="commerceSnapshot">刷新预览</button><button type="button" class="button secondary" id="commerceCloseBrowser">关闭网页会话</button></div>
+    <p id="commerceBrowserStatus" role="status">点击预览操作网页；扫码后刷新预览。</p>
+    <div class="commerce-browser-layout"><div><img id="commerceBrowserImage" alt="可点击操作的商品网页预览" draggable="false"><div class="commerce-toolbar"><button type="button" class="button secondary" data-commerce-scroll="-650">向上滚动</button><button type="button" class="button secondary" data-commerce-scroll="650">向下滚动</button><button type="button" class="button secondary" data-commerce-key="Tab">Tab</button><button type="button" class="button secondary" data-commerce-key="Enter">回车</button><button type="button" class="button secondary" data-commerce-key="Escape">退出弹层</button><button type="button" class="button secondary" data-commerce-key="Control+A">全选</button><button type="button" class="button secondary" data-commerce-key="Backspace">删除</button></div><div class="commerce-toolbar"><input id="commerceBrowserText" type="password" autocomplete="off" aria-label="向网页输入文字" placeholder="点击网页输入框后，在此输入文字"><button type="button" class="button secondary" id="commerceType">输入到网页</button></div></div>
+        <aside><button type="button" class="button primary" id="commerceCapture">采集当前 1688 商品</button><section id="commerceMapping"><h3>匹配当前页面字段</h3><p>先选类目，再选择对应控件。多规格先选择本次 SKU，再匹配同行价格与库存。</p><div id="commerceFieldMap"></div><button type="button" class="button primary" id="commerceFill">填写选中字段 / 上传素材</button><button type="button" class="button secondary" id="commerceSaveDraft">点击网页「保存草稿」</button><p>上传选择后，请在网页核对图片、SKU、类目和运费。完成平台提交后登记结果。</p><input id="commerceExternalId" aria-label="平台商品编号" placeholder="平台商品编号"><button type="button" class="button secondary" id="commerceVerify">核验平台结果</button></section></aside>
+    </div>
+</dialog>
 </body>
 </html>

@@ -1,4 +1,6 @@
 from typing import TYPE_CHECKING
+from asyncio import to_thread
+from urllib.parse import parse_qs, urlsplit
 
 from curl_cffi.requests import get
 from curl_cffi.requests.exceptions import RequestException
@@ -24,6 +26,7 @@ class Html:
         self.timeout = manager.timeout
         self.proxy = manager.proxy
         self.impersonate = manager.impersonate
+        self.last_error = ""
 
     @retry
     async def request_url(
@@ -37,9 +40,10 @@ class Html:
         if not url.startswith("http"):
             url = f"https://{url}"
         headers = self.manager.get_headers(url)
+        self.last_error = ""
         try:
             if cookie:
-                response = self.__request_url_with_cookie(
+                response = await to_thread(self.__request_url_with_cookie,
                     url,
                     headers,
                     cookie,
@@ -55,8 +59,28 @@ class Html:
                 )
             await sleep_time()
             response.raise_for_status()
+            final_url = urlsplit(str(response.url))
+            final_path = final_url.path.lower().rstrip("/")
+            error_code = parse_qs(final_url.query).get("error_code", [""])[0]
+            if final_path == "/404" or error_code == "300031":
+                self.last_error = "小红书链接已失效或需要完整分享链接（含 xsec_token）"
+                return ""
+            if "login" in final_path:
+                self.last_error = "小红书要求登录，请更新 Cookie 后重试"
+                return ""
             return response.text if content else str(response.url)
-        except RequestException as error:
+        except (RequestException, TimeoutError, OSError) as error:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            self.last_error = (
+                f"小红书返回 HTTP {status}，请确认链接可访问、Cookie 有效后重试"
+                if status
+                else (
+                    "小红书网络请求失败或超时；当前未配置 Cookie，"
+                    "需要登录态的笔记请先在设置中保存 Cookie 后重试"
+                    if not getattr(self.manager.request_client, "cookies", {})
+                    else "小红书网络请求失败或超时，请检查网络后重试"
+                )
+            )
             logging(
                 self.print,
                 _("网络异常，{0} 请求失败: {1}").format(url, repr(error)),

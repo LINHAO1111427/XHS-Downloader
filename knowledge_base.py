@@ -10,6 +10,11 @@ from time import time
 from typing import Iterator
 from uuid import uuid4
 
+from knowledge_vector_index import ensure_schema as ensure_vector_schema
+from knowledge_vector_index import rank as rank_vectors
+from knowledge_vector_index import rebuild as rebuild_vectors
+from knowledge_vector_index import upsert_vector
+
 
 class KnowledgeBaseError(ValueError):
     pass
@@ -130,6 +135,45 @@ def _search_terms(value: str) -> set[str]:
         if re.fullmatch(r"[\u4e00-\u9fff]+", token) and len(token) > 1:
             terms.update(token[index : index + 2] for index in range(len(token) - 1))
     return terms
+
+
+CREATION_QUERIES = {
+    "note": "爆款笔记拆解 标题 点击 首句 情绪 痛点 人货场 正文",
+    "image": "生图 封面 构图 场景 真实感 随拍 光线 产品一致性",
+}
+
+
+def _knowledge_excerpt(content: str, query: str, budget: int) -> str:
+    # Imported course chunks often start with provenance and YAML, not the lesson.
+    cleaned = re.sub(r"(?ms)^---\s*\n.*?\n---\s*(?:\n|$)", "", content)
+    cleaned = "\n".join(line for line in cleaned.splitlines() if not re.match(
+        r"^(来源：|课程章节：|原始页面：|读取范围：|##?\s*\d\d:|> 本稿)", line
+    )).strip()
+    if len(cleaned) <= budget:
+        return cleaned
+    # Preserve verbatim, query-relevant sentence windows instead of only the opening.
+    sentences = re.split(r"(?<=[。！？\n])", cleaned)
+    windows, current = [], ""
+    for sentence in sentences:
+        if current and len(current) + len(sentence) > max(120, budget // 2):
+            windows.append(current.strip())
+            current = ""
+        current += sentence
+    if current.strip():
+        windows.append(current.strip())
+    terms = _search_terms(query)
+    ranked = sorted(enumerate(windows), key=lambda item: (
+        -sum(term in item[1].casefold() for term in terms), item[0]
+    ))
+    chosen, remaining = [], max(0, budget - 5)
+    for index, window in ranked[:2]:
+        excerpt = window[:remaining]
+        if excerpt:
+            chosen.append((index, excerpt))
+            remaining -= len(excerpt) + 3
+        if remaining <= 0:
+            break
+    return "\n…\n".join(text for _, text in sorted(chosen)) + "…"
 
 
 class KnowledgeBase:
@@ -264,6 +308,7 @@ class KnowledgeBase:
                 ON corpus_entries(add_to_cart_24h DESC);
                 """
             )
+            ensure_vector_schema(connection)
             run_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(generation_runs)")
@@ -299,6 +344,7 @@ class KnowledgeBase:
                         now,
                     ),
                 )
+            rebuild_vectors(connection, only_missing=True)
             connection.commit()
 
     @staticmethod
@@ -425,6 +471,9 @@ class KnowledgeBase:
             corpus = connection.execute(
                 "SELECT COUNT(*) AS total FROM corpus_entries"
             ).fetchone()
+            vectors = connection.execute(
+                "SELECT COUNT(*) AS total FROM knowledge_vectors"
+            ).fetchone()
             migration = connection.execute(
                 "SELECT MAX(version) AS version FROM knowledge_schema_migrations"
             ).fetchone()
@@ -437,7 +486,70 @@ class KnowledgeBase:
             "history_schema_version": int(migration["version"] or 1),
             "rated_runs": int(rated["total"] or 0),
             "corpus_entries": int(corpus["total"] or 0),
+            "vector_entries": int(vectors["total"] or 0),
+            "vector_version": 1,
         }
+
+    def import_document(self, filename: str, data: bytes, kind: str, created_by: str) -> dict:
+        """Import exported knowledge as bounded, attributable, deduplicated chunks."""
+        filename = Path(filename.replace("\\", "/")).name
+        suffix = Path(filename).suffix.lower()
+        if suffix not in {".txt", ".md", ".json"}:
+            raise KnowledgeBaseError("请导入 UTF-8 编码的 TXT、Markdown 或 JSON 文档")
+        if len(data) > 1024 * 1024:
+            raise KnowledgeBaseError("文档请控制在 1 MB 内")
+        text = data.decode("utf-8-sig").strip()
+        documents = []
+        if suffix == ".json":
+            payload = json.loads(text)
+            entries = payload.get("entries") if isinstance(payload, dict) else payload
+            if not isinstance(entries, list):
+                raise KnowledgeBaseError('JSON 应为 [{"title":"标题","content":"正文"}] 或包含 entries 数组')
+            for entry in entries:
+                if not isinstance(entry, dict) or not isinstance(entry.get("content"), str):
+                    raise KnowledgeBaseError("JSON 每条知识需要字符串 content 字段")
+                title = entry.get("title", Path(filename).stem)
+                if not isinstance(title, str):
+                    raise KnowledgeBaseError("JSON 标题应为字符串")
+                documents.append((title.strip() or Path(filename).stem, entry["content"].strip()))
+        else:
+            documents.append((Path(filename).stem, text))
+        prepared = []
+        now = _now()
+        for title, content in documents:
+            if not content:
+                continue
+            # Paragraph boundaries are preferred; long single paragraphs are also bounded.
+            chunks, chunk = [], ""
+            for paragraph in content.split("\n\n"):
+                for offset in range(0, len(paragraph), 3500):
+                    part = paragraph[offset:offset + 3500]
+                    if len(chunk) + len(part) + 2 > 3500:
+                        chunks.append(chunk)
+                        chunk = ""
+                    chunk = (chunk + "\n\n" + part).strip()
+            if chunk:
+                chunks.append(chunk)
+            for index, chunk in enumerate(chunks):
+                heading = f"{title[:90]} · {index + 1}/{len(chunks)}"
+                _validate_entry(kind, heading, chunk, ["导入知识", "IMA"], 70)
+                digest = sha256((kind + "\0" + chunk).encode()).hexdigest()
+                prepared.append(("document-" + digest, kind, heading, chunk,
+                    json.dumps(["导入知识", "IMA"], ensure_ascii=False), 70, "document:" + filename,
+                    created_by, now, now))
+        if not prepared or len(prepared) > 300:
+            raise KnowledgeBaseError("文档内容为空或超过 300 个知识片段，请分批导入")
+        with self._connection() as connection:
+            before = connection.total_changes
+            connection.executemany(
+                """INSERT OR IGNORE INTO knowledge_entries
+                (id, kind, title, content, tags, priority, origin, created_by, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", prepared)
+            inserted = connection.total_changes - before
+            rebuild_vectors(connection, only_missing=True)
+            connection.commit()
+        return {"imported": inserted, "duplicates": len(prepared) - inserted,
+                "source": filename, "stats": self.stats()}
 
     def list_entries(
         self,
@@ -509,10 +621,12 @@ class KnowledgeBase:
                     now,
                 ),
             )
-            connection.commit()
             row = connection.execute(
                 "SELECT * FROM knowledge_entries WHERE id = ?", (entry_id,)
             ).fetchone()
+            if row["active"]:
+                upsert_vector(connection, row)
+            connection.commit()
         return self._entry_payload(row)
 
     def update_entry(
@@ -549,10 +663,14 @@ class KnowledgeBase:
             )
             if not cursor.rowcount:
                 raise KnowledgeEntryNotFound("知识条目不存在")
-            connection.commit()
             row = connection.execute(
                 "SELECT * FROM knowledge_entries WHERE id = ?", (entry_id,)
             ).fetchone()
+            if row["active"]:
+                upsert_vector(connection, row)
+            else:
+                connection.execute("DELETE FROM knowledge_vectors WHERE entry_id=?", (entry_id,))
+            connection.commit()
         return self._entry_payload(row)
 
     def delete_entry(self, entry_id: str) -> None:
@@ -782,6 +900,7 @@ class KnowledgeBase:
                 """,
                 tuple(sorted(selected_kinds)),
             ).fetchall()
+            vector_scores = rank_vectors(connection, query, selected_kinds, limit=50)
         terms = _search_terms(query)
         ranked: list[tuple[float, sqlite3.Row]] = []
         for row in rows:
@@ -790,7 +909,8 @@ class KnowledgeBase:
             matches = sum(1 for term in terms if term in searchable)
             title_matches = sum(1 for term in terms if term in title)
             kind_bonus = 1.5 if row["kind"] != "general" else 1.0
-            score = int(row["priority"]) / 100 + kind_bonus + matches + title_matches
+            semantic = max(0.0, float(vector_scores.get(str(row["id"]), 0.0)))
+            score = int(row["priority"]) / 100 + kind_bonus + matches + title_matches + semantic * 4.0
             ranked.append((score, row))
         ranked.sort(
             key=lambda item: (item[0], item[1]["priority"], item[1]["updated_at"]),
@@ -798,7 +918,50 @@ class KnowledgeBase:
         )
         return [self._entry_payload(row) for _, row in ranked[: max(1, min(limit, 12))]]
 
-    def context(self, entries: list[dict], max_chars: int = 6_000) -> str:
+    def retrieve_for_creation(self, query: str, kinds: set[str], limit: int = 6) -> list[dict]:
+        """Reserve room for product relevance AND reusable writing/photo lessons."""
+        limit = max(1, min(limit, 12))
+        selected_kinds = kinds & KNOWLEDGE_KINDS
+        if not selected_kinds:
+            return []
+        # Explicit, persistent user requirements must not lose to keyword matches.
+        # Read on each request so edits and disabling take effect immediately.
+        placeholders = ",".join("?" for _ in selected_kinds)
+        with self._connection() as connection:
+            required = connection.execute(
+                f"""SELECT * FROM knowledge_entries
+                    WHERE active=1 AND origin='user_requirement' AND kind IN ({placeholders})
+                    ORDER BY priority DESC, updated_at DESC, id ASC LIMIT ?""",
+                (*sorted(selected_kinds), limit),
+            ).fetchall()
+        selected = [self._entry_payload(row) for row in required]
+        if len(selected) == limit:
+            return selected
+        lanes = [self.retrieve(query, kinds, limit=limit)]
+        for kind, method_query in CREATION_QUERIES.items():
+            if kind in kinds:
+                lanes.append(self.retrieve(method_query, {kind}, limit=limit))
+        seen = {entry["id"] for entry in selected}
+        families = {}
+        for entry in selected:
+            family = entry["title"].split(" · 分段")[0]
+            families[family] = families.get(family, 0) + 1
+        for index in range(limit):
+            for lane in lanes:
+                if index >= len(lane):
+                    continue
+                entry = lane[index]
+                family = entry["title"].split(" · 分段")[0]
+                if entry["id"] in seen or families.get(family, 0) >= 2:
+                    continue
+                seen.add(entry["id"])
+                families[family] = families.get(family, 0) + 1
+                selected.append(entry)
+                if len(selected) == limit:
+                    return selected
+        return selected
+
+    def context(self, entries: list[dict], max_chars: int = 6_000, *, query: str = "") -> str:
         if not entries:
             return ""
         parts = [
@@ -806,9 +969,18 @@ class KnowledgeBase:
         ]
         labels = {"general": "通用", "note": "笔记", "image": "图片"}
         used: list[str] = []
-        for entry in entries:
-            section = f"[{labels[entry['kind']]}] {entry['title']}\n{entry['content']}"
-            if len("\n\n".join(parts + [section])) > max_chars:
+        if len(parts[0]) > max_chars:
+            return ""
+        for index, entry in enumerate(entries):
+            remaining = max_chars - len("\n\n".join(parts)) - 2
+            allowance = remaining // (len(entries) - index)
+            heading = f"[{labels[entry['kind']]}] {entry['title'][:180]}\n"
+            if allowance <= len(heading) + 20:
+                continue
+            strategy_query = CREATION_QUERIES.get(entry["kind"], " ".join(CREATION_QUERIES.values()))
+            excerpt = _knowledge_excerpt(entry["content"], query + " " + strategy_query, allowance - len(heading))
+            section = heading + excerpt
+            if len(section) > remaining:
                 break
             parts.append(section)
             used.append(entry["id"])

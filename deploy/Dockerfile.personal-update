@@ -1,0 +1,8 @@
+# Fast local refresh using the dependency image already installed on this PC.
+# Fresh servers use compose.personal.yml's full Dockerfile.server build.
+ARG BASE_IMAGE=xhs-server:trial-10
+FROM ${BASE_IMAGE}
+COPY *.py /app/
+COPY source /app/source
+COPY static /app/static
+COPY locale /app/locale

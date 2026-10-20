@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from aiofiles import open
 from curl_cffi.requests.exceptions import RequestException
+from PIL import Image, ImageOps
 
 from ..expansion import CacheError
 
@@ -24,7 +25,33 @@ if TYPE_CHECKING:
 
     from ..module import Manager
 
-__all__ = ["Download"]
+__all__ = ["Download", "normalize_downloaded_jpeg"]
+
+
+def normalize_downloaded_jpeg(path: Path) -> None:
+    """Decode an image download and atomically replace it with JPEG content."""
+    converted = path.with_name(path.name + ".convert")
+    try:
+        with Image.open(path) as source:
+            source.load()
+            image = ImageOps.exif_transpose(source)
+            if image.mode in {"RGBA", "LA"} or (
+                image.mode == "P" and "transparency" in image.info
+            ):
+                rgba = image.convert("RGBA")
+                background = Image.new("RGB", rgba.size, "white")
+                background.paste(rgba, mask=rgba.getchannel("A"))
+                image = background
+            elif image.mode != "RGB":
+                image = image.convert("RGB")
+            image.save(converted, "JPEG", quality=95, optimize=True, subsampling=0)
+        converted.replace(path)
+    except Exception as error:
+        raise CacheError(
+            _("?? {0} ??? JPG ????????{1}").format(path.name, repr(error))
+        ) from error
+    finally:
+        converted.unlink(missing_ok=True)
 
 
 class Download:
@@ -57,6 +84,7 @@ class Download:
         self.live_format = "mp4"
         self.image_format = manager.image_format
         self.image_format_list = (
+            "jpg",
             "jpeg",
             "png",
             "webp",
@@ -116,13 +144,13 @@ class Download:
         return tasks
 
     def generate_path(self, nickname: str, filename: str):
-        if self.author_archive:
-            folder = self.folder.joinpath(nickname)
-            folder.mkdir(exist_ok=True)
-        else:
-            folder = self.folder
+        # Keep every collected note's media and metadata together in its own
+        # note folder.  This makes repeated collection batches easy to browse
+        # and prevents images from different notes mixing in one directory.
+        folder = self.folder.joinpath(nickname)
+        folder.mkdir(parents=True, exist_ok=True)
         path = self.manager.archive(folder, filename, self.folder_mode)
-        path.mkdir(exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
         return path
 
     def __ready_download_video(
@@ -260,6 +288,8 @@ class Download:
                             report("downloading", total)
                         if buffer:
                             await f.write(bytes(buffer))
+                if format_.lower() in {"jpg", "jpeg"}:
+                    normalize_downloaded_jpeg(temp)
                 real = await self.__suffix_with_file(
                     temp,
                     path,
@@ -355,6 +385,8 @@ class Download:
                 file_start = await f.read(FILE_SIGNATURES_LENGTH)
             for offset, signature, suffix in FILE_SIGNATURES:
                 if file_start[offset : offset + len(signature)] == signature:
+                    if suffix == "jpeg" and default_suffix.lower() in {"jpg", "jpeg"}:
+                        suffix = "jpg"
                     return path.joinpath(f"{name}.{suffix}")
         except Exception as error:
             logging(

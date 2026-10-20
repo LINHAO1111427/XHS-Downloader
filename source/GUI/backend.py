@@ -130,6 +130,7 @@ class TaskState:
     script_data: dict[str, Any] | None = None
     index: list | tuple | None = None
     display_text: str | None = None
+    error: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         """转换为可通过 PyWebView 序列化给 JavaScript 的普通字典。"""
@@ -140,6 +141,7 @@ class TaskState:
             "display_text": self.display_text or self.url,
             "source": self.source,
             "state": self.state,
+            "error": self.error,
         }
 
 
@@ -167,13 +169,16 @@ class GuiLogSink:
 class GuiBackend:
     """维护一个下载器实例和一个长期运行的 asyncio 事件循环。"""
 
-    def __init__(self) -> None:
+    def __init__(self, data_root: Path | None = None) -> None:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.thread: Thread | None = None
         self.ready = Event()
         self.start_error: BaseException | None = None
         self.closed = False
-        self.settings_manager = Settings(VOLUME)
+        self.data_root = data_root or VOLUME
+        self.isolated = data_root is not None
+        self.data_root.mkdir(parents=True, exist_ok=True)
+        self.settings_manager = Settings(self.data_root)
         self.settings: dict[str, Any] = {}
         self.xhs: XHS | None = None
         self.task_queue: asyncio.Queue[str] | None = None
@@ -247,7 +252,7 @@ class GuiBackend:
     async def _create_xhs(self) -> None:
         """按当前配置创建 XHS 实例，并把核心日志导向 GUI。"""
 
-        self.xhs = XHS(**self.settings, _print=False)
+        self.xhs = XHS(**self.settings, _print=False, _isolated=self.isolated, _storage_root=self.data_root)
         self.xhs.print.func = GuiLogSink(self)
         self.xhs.script_task_handler = self.create_script_task
         await self.xhs.__aenter__()
@@ -390,6 +395,7 @@ class GuiBackend:
         if task.state != "pending":
             return
         task.state = "processing"
+        task.error = ""
         try:
             # extract() 通过回调返回汇总统计，GUI 不根据 URL 推断任务结果。
             statistics: dict[str, Any] = {}
@@ -421,6 +427,7 @@ class GuiBackend:
                 task.state = "skipped"
             else:
                 task.state = "failed"
+                task.error = getattr(self.xhs.html, "last_error", "") or "笔记采集失败，请确认链接、Cookie 和网络状态后重试"
             if self.xhs.manager.download_record:
                 self.history_revision += 1
         except CancelledError:
@@ -429,6 +436,7 @@ class GuiBackend:
             raise
         except Exception as error:
             task.state = "failed"
+            task.error = str(error) or "笔记采集异常，请稍后重试"
             self.add_log(str(error), "error")
 
     def on_file_progress(self, event: dict[str, Any]) -> None:
@@ -656,7 +664,7 @@ class GuiBackend:
             )
             effective_path = manager.path
         else:
-            effective_path = Path(configured_path) if configured_path else VOLUME
+            effective_path = Path(configured_path) if configured_path else self.data_root
         payload["effective_work_path"] = str(effective_path.resolve())
         return payload
 

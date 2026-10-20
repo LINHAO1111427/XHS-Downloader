@@ -106,27 +106,34 @@
 <li>运行 <code>.\start-web.ps1</code>，浏览器打开 <code>http://127.0.0.1:5557</code></li>
 <li>首次注册的账号自动成为管理员；后续账号为普通用户</li>
 <li>管理员可在“用户管理”中启停账号或关闭开放注册</li>
-<li>管理员在“AI 中转设置”中保存 Base URL、API Key 和模型；普通用户的 AI 请求统一通过该服务端中转配置</li>
+<li>文案、图片生成与图片修改统一通过本地中转 <code>http://127.0.0.1:8088/v1</code>；优先读取 <code>XHS_CODEX_RELAY_API_KEY</code>，否则复用 <code>SUB2API_API_KEY</code>。可用 <code>XHS_CODEX_RELAY_BASE_URL</code> 指向同机或局域网内的兼容中转。</li>
 </ol>
 <p>账号、会话与 AI 密钥保存在 <code>Volume</code> 目录，不会提交到 Git。可通过 <code>XHS_AUTH_DB_PATH</code> 和 <code>XHS_AI_CONFIG_PATH</code> 指定存储位置。对外提供服务时，可运行 <code>.\start-web.ps1 -BindHost 0.0.0.0 -NoBrowser</code>，并使用 HTTPS 反向代理；同时设置环境变量 <code>XHS_WEB_SECURE_COOKIE=true</code>。</p>
+<h3>商品详情和商品原图</h3>
+<p>1688 商品采集会同时保存主图、详情图和商品页返回的 MP4 主图视频。视频可在商品卡片中播放或单独下载，打包素材会包含 <code>images/</code>、<code>details/</code>、<code>videos/</code> 和商品信息。已有记录可点击“补齐素材”补下载详情图及视频。</p>
+<p>在 Web 工作台的“商品素材”中选择平台并粘贴商品分享链接。小红书动态商品页使用浏览器读取页面自身加载的商品接口，再保存名称、当前规格、到手价、页面售价、店铺、销量原文、规格和图片；笔记链接请使用下载功能。</p>
+<p>动态商品页额外依赖 <code>requirements-product-browser.txt</code>：在项目虚拟环境中执行 <code>pip install -r requirements-product-browser.txt</code>，或 <code>uv pip install -r requirements-product-browser.txt</code>。Windows 优先使用已安装的 Microsoft Edge；其他环境执行 <code>python -m playwright install chromium</code> 安装 Chromium。可通过 <code>XHS_PRODUCT_BROWSER_CHANNEL</code> 指定浏览器频道。商品价格和销量保留本次页面返回值。</p>
 <h3>每日低粉爆款</h3>
 <p>“今日（北京时间）”只保留本次采集日 00:00 至采集开始时发布的笔记，与滚动的“近 24 小时”分开。可单独设置“点赞下限”，不会把收藏、评论或分享当成点赞。“粉丝低于 1,000、点赞在 500 以上”对应粉丝上限 <code>999</code>、点赞下限 <code>500</code>；高级设置中的总互动下限和互动/粉丝下限可设为 <code>0</code>。API 字段分别为 <code>time_range: "today"</code>、<code>max_followers: 999</code>、<code>min_likes: 500</code>；旧配置默认保留滚动时间范围和不额外限定点赞的行为。</p>
-<p>Web 工作台提供按关键词搜索的低粉爆款候选榜单。管理员先在 Cookie 设置中保存已登录小红书网页的完整 Cookie（包含 <code>a1</code>、<code>web_session</code>），再填写关键词和筛选规则，点击“立即采集”。普通用户可查看团队榜单、导出 CSV 和下载笔记素材。</p>
+<p>Web 工作台提供按关键词搜索的低粉爆款候选榜单。管理员先点击“重新扫码登录”，系统会保存已核验的网页登录状态；每次采集会打开干净的 Edge 官方页面并载入该状态，再按关键词搜索。普通用户可查看团队榜单、导出 CSV 和下载笔记素材。</p>
 <p>下载页支持视频预览与保存；勾选多个 MP4/MOV/M4V 后可使用“视频混剪”生成合成片段，也可使用“查重”按 SHA-256 找出完全相同的视频。混剪依赖 <code>imageio-ffmpeg</code>，任务在后台执行并显示结果。</p>
+<h3>AI 物品运动实况</h3>
+<p>在下载文件中选择一张图片并点击“生成实况”，将动效模式切换为“AI 物品运动（LTX）”。任务先保存 <code>*_ai_motion.mp4</code>，再生成带 Live Photo 视频元数据的 <code>*_ai_motion_live.mov</code>；留空动作描述会使用锁定镜头和背景、仅让商品旋转摇摆的默认提示词。</p>
+<p>默认调用开源项目官方的 <code>Lightricks/ltx-video-distilled</code> Hugging Face Space。可通过 <code>XHS_LTX_SPACE_ID</code> 指向自建或局域网部署的同接口 Space；受保护的 Space 可配置 <code>XHS_LTX_SPACE_TOKEN</code> 或 <code>HF_TOKEN</code>。推理服务不可用时，任务会保留失败原因，不会退回静态缩放结果。</p>
 <ul>
 <li>默认规则：近 24 小时发布、作者粉丝不超过 50,000、总互动不少于 500、互动/粉丝比不少于 0.1。总互动 = 点赞 + 收藏 + 评论 + 分享；所有阈值均可调整。</li>
-<li>每批最多 5 个关键词，每词 1 至 3 页（每页 20 条），最多核验 100 篇笔记；跨关键词去重并复用本批次作者数据。请求串行执行，间隔至少 1.5 秒。搜索使用最新发布排序，因此结果是所选关键词与页数内的候选样本，不是全站官方榜单，也不是当日互动增量榜。</li>
+<li>每批最多 5 个关键词，每词 1 至 3 页（每页约 20 条），最多核验 100 篇笔记；跨关键词去重并复用本批次作者数据。默认通过 Edge 打开小红书官方搜索、笔记和作者页面，滚动及页面切换使用随机停顿；结果是所选关键词与页面范围内的候选样本，不是全站官方榜单，也不是当日互动增量榜。</li>
 <li>笔记发布时间、任一互动数或作者粉丝数缺失时排除该笔记；粉丝数 0 与未知分开处理。平台返回的“万”等显示值按单位转换，其精度以平台返回值为准。</li>
 <li>爆款分仅用于样本内排序：<code>100 * ln(1 + 总互动) * ln(1 + 总互动 / max(粉丝数, 100)) / sqrt(发布小时数 + 1)</code>。互动/粉丝比的分母使用 <code>max(粉丝数, 1)</code>；评分采用至少 100 的分母以减轻极小账号的波动。</li>
 <li>勾选“每日定时”、设置北京时间后点击“保存规则”。Web 服务持续运行时，每日到点执行一次；当天开机晚于设定时间时补执行一次，不补采此前停机的日期。同一数据库使用单个 Web 服务进程。默认定时关闭。</li>
-<li>失败、部分完成、字段缺失、分页上限及取消都会保留状态。平台要求重新登录或验证时结束本批采集，在小红书网页完成后更新 Cookie，再手动发起采集。重启时未结束的批次标记为中断，不自动重复请求。</li>
+<li>失败、部分完成、字段缺失、分页上限及取消都会保留状态。平台要求重新登录或验证时结束本批采集，点击“重新扫码登录”并在官方 Edge 窗口完成验证后，再手动发起采集；无需手工复制 Cookie。重启时未结束的批次标记为中断，不自动重复请求。</li>
 <li>每批保存标题、正文、标签、原笔记链接、作者、粉丝数、四项互动、发布时间、采集时间及评分。历史批次在 <code>Volume/viral_notes.db</code> 中保存，界面展示最近 50 批；可通过 <code>XHS_VIRAL_DB_PATH</code> 指定数据库路径。CSV 包含 UTF-8 BOM，适用于 Excel。</li>
 </ul>
 <h3>AI 用量与计费</h3>
 <p>AI 生成采用点数账本：文本生成消耗 1 点，图片生成消耗 5 点；默认每个账号每天赠送 20 点。默认充值档位为 100 点 ¥9.90、500 点 ¥29.90、2,000 点 ¥99.00，价格和额度保存在 <code>billing_plans</code> 表中，可在接入实际支付渠道前调整。扣费使用请求幂等键和 SQLite 事务，AI 请求失败会退回预扣点数；当前支付订单会记录为 <code>pending</code>，支付回调接口接入后再发放付费点数。</p>
 <p>AI 历史已迁移为 <code>generation_records</code>、<code>generation_inputs</code>、<code>generation_outputs</code>、<code>generation_assets</code>、<code>generation_references</code> 和 <code>generation_feedback</code> 多张关联表。旧的 <code>generation_runs</code> 表暂作兼容来源，启动时自动回填，便于后续分阶段迁移。</p>
 <p>新增接口：<code>GET /api/viral</code>、<code>POST /api/viral/runs</code>、<code>GET /api/viral/runs/{id}</code>、<code>DELETE /api/viral/runs/{id}</code>、<code>GET /api/viral/runs/{id}/export</code>、<code>PUT /api/viral/schedule</code>。接口沿用账号会话及 CSRF 校验；采集、取消和定时配置仅管理员可操作。</p>
-<p>验证：<code>python -m unittest discover -s tests -v</code>。浏览器回归使用隔离的模拟数据，安装 Playwright 并配置 Edge 后运行 <code>python -m tests.check_viral_browser</code>；模拟测试不代表当前 Cookie 已通过小红书真实接口验证。</p>
+<p>测试脚本已单独归档，恢复方法见 <a href="docs/workspace-cleanup-20261020.md">工作区清理说明</a>。恢复 <code>tests/</code> 后可运行 <code>python -m unittest discover -s tests -v</code>；浏览器回归还需安装 Playwright 并配置 Edge。模拟测试不代表当前 Cookie 已通过小红书真实接口验证。</p>
 <h2>⌨️ Docker 运行</h2>
 <ol>
 <li>获取镜像</li>
@@ -309,7 +316,7 @@ async def example_api():
 </ul>
 <p><strong>自动滚动页面功能代码已重构，该功能默认关闭！启用该功能可能会被小红书检测为自动化操作，从而导致账号受到风控或封禁风险！</strong></p>
 <h1>💻 二次开发</h1>
-<p>如果有其他需求，可以根据 <code>example.py</code> 的注释提示进行代码调用或修改！</p>
+<p>独立调用示例 <code>example.py</code> 已单独归档，需要时可按 <a href="docs/workspace-cleanup-20261020.md">工作区清理说明</a> 恢复。</p>
 <pre>
 async def example():
     """通过代码设置参数，适合二次开发"""

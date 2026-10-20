@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 /.venv/
 /.ruff_cache/
+/.pytest_cache/
+/.playwright-mcp/
 /.install/
 /.tmp/edge-kb-check/
 /.tmp/edge-kb-mobile-check/
@@ -12,3 +14,23 @@ __pycache__/
 /build/
 /dist/
 /output/
+/ServerVolume/
+/DockerData/
+/Backups/
+/DockerRestoreCheck/
+/deploy/server.env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local task artifacts and downloaded media
+/.tmp/
+/.workbuddy/
+/artifacts/
+/Download/
+/vendor/**/Volume/
+
+# Local operator instructions and account-specific working notes
+/AGENTS.md

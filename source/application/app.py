@@ -10,7 +10,7 @@ from asyncio import (
 )
 from contextlib import suppress
 from datetime import datetime
-from re import compile
+from re import IGNORECASE, compile
 from textwrap import dedent
 from types import SimpleNamespace
 from typing import Annotated, Awaitable, Callable
@@ -122,12 +122,23 @@ class XHS:
     SHORT = compile(
         r"(?:https?://)?xhslink\.(?:com|cn)/[^\s\"<>\\^`{|}，。；！？、【】《》]+"
     )
+    SHARED_URL = compile(
+        r"(?<![\w./@-])(?:https?://)?(?:(?:www\.|m\.)?(?:xiaohongshu|rednote)\.com|xhslink\.(?:com|cn))"
+        r"/[^\s\"<>\\^`{|}，。；！？、【】《》]+"
+    )
+    ESCAPED_AMP = compile(r"&(?:amp|#0*38|#x0*26);", IGNORECASE)
+    NOTE_PATH = compile(
+        r"^/(?:explore|discovery/item)/[a-zA-Z0-9]+/?$|"
+        r"^/user/profile/[a-zA-Z0-9]+/[a-zA-Z0-9]+/?$"
+    )
     ID = compile(r"(?:explore|item)/(\S+)?\?")
     ID_USER = compile(r"user/profile/[a-z0-9]+/(\S+)?\?")
     __INSTANCE = None
     CLEANER = Cleaner()
 
     def __new__(cls, *args, **kwargs):
+        if kwargs.get("_isolated"):
+            return super().__new__(cls)
         if not cls.__INSTANCE:
             cls.__INSTANCE = super().__new__(cls)
         return cls.__INSTANCE
@@ -166,7 +177,7 @@ class XHS:
         switch_language(language)
         self.print = Print()
         self.manager = Manager(
-            VOLUME,
+            kwargs.get("_storage_root") or VOLUME,
             work_path,
             folder_name,
             name_format,
@@ -245,7 +256,7 @@ class XHS:
         task_id: str | None = None,
     ):
         nickname = (
-            f"{container['作者ID']}_{self.CLEANER.filter_name(container['作者昵称'])}"
+            f"{self.CLEANER.filter_name(container.get('作品ID') or container.get('笔记ID') or container['作者ID'])}_{self.CLEANER.filter_name(container['作者昵称'])}"
         )
         filename = self.__naming_rules(container)
         path = self.downloader.generate_path(nickname, filename)
@@ -397,27 +408,26 @@ class XHS:
         url: str,
         proxy: str | None = None,
     ) -> list[str]:
-        urls = []
-        for i in url.split():
-            if u := self.SHORT.search(i):
-                i = await self.html.request_url(
-                    u.group(),
-                    False,
-                    proxy=proxy,
-                )
-            if u := self.SHARE_XHS.search(i):
-                urls.append(u.group())
-            elif u := self.SHARE_RN.search(i):
-                urls.append(u.group())
-            elif u := self.LINK_XHS.search(i):
-                urls.append(u.group())
-            elif u := self.LINK_RN.search(i):
-                urls.append(u.group())
-            elif u := self.USER_XHS.search(i):
-                urls.append(u.group())
-            elif u := self.USER_RN.search(i):
-                urls.append(u.group())
-        return urls
+        urls, errors = [], []
+        for match in self.SHARED_URL.finditer(self.ESCAPED_AMP.sub("&", url)):
+            value = match.group().rstrip(")]}>.,;!?）")
+            if not value.startswith(("http://", "https://")):
+                value = "https://" + value
+            if urlparse(value).hostname in {"xhslink.com", "xhslink.cn"}:
+                value = await self.html.request_url(value, False, proxy=proxy)
+                if not value:
+                    errors.append(self.html.last_error or "小红书短链解析失败，请复制完整笔记链接")
+                    continue
+            parsed = urlparse(value)
+            host = (parsed.hostname or "").lower()
+            if host in {"www.xiaohongshu.com", "xiaohongshu.com", "m.xiaohongshu.com", "www.rednote.com", "rednote.com", "m.rednote.com"} and self.NOTE_PATH.fullmatch(parsed.path):
+                host = "www.rednote.com" if host.endswith("rednote.com") else "www.xiaohongshu.com"
+                urls.append(parsed._replace(scheme="https", netloc=host, fragment="", path=parsed.path.rstrip("/")).geturl())
+            else:
+                errors.append("链接未指向小红书笔记，可能已失效或要求登录；请重新复制笔记的分享链接")
+        if not urls and errors:
+            raise ValueError(errors[0])
+        return list(dict.fromkeys(urls))
 
     def extract_id(self, links: list[str]) -> list[str]:
         ids = []
@@ -444,6 +454,8 @@ class XHS:
         )
         namespace = self.__generate_data_object(html)
         if not namespace:
+            if not self.html.last_error:
+                self.html.last_error = "小红书未返回笔记详情，请确认笔记可访问，并使用包含 xsec_token 的完整分享链接；如提示登录，请更新 Cookie"
             self.logging(_("{0} 获取数据失败").format(id_), ERROR)
             count.fail += 1
             return {}
@@ -552,6 +564,10 @@ class XHS:
             data
             | {
                 "作品链接": url,
+                # Preserve product cards from the raw note payload.  Consumers such
+                # as the account operation workspace need the attached products,
+                # not only the flattened note text and media URLs.
+                "挂载商品": self.explore.products(namespace),
             },
             namespace,
             id_,

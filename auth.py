@@ -161,9 +161,20 @@ class LoginThrottle:
 
 
 class AuthStore:
-    def __init__(self, path: Path, session_ttl: int = SESSION_TTL_SECONDS) -> None:
+    def __init__(
+        self,
+        path: Path,
+        session_ttl: int = SESSION_TTL_SECONDS,
+        *,
+        allow_first_admin: bool = True,
+        max_users: int | None = None,
+    ) -> None:
         self.path = path
         self.session_ttl = session_ttl
+        self.allow_first_admin = allow_first_admin
+        if max_users is not None and (type(max_users) is not int or max_users < 1):
+            raise ValueError("用户容量需要为正整数")
+        self.max_users = max_users
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
         self._dummy_password = hash_password("timing-equalizer-2026")
@@ -222,12 +233,29 @@ class AuthStore:
                 connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             )
             enabled = self._registration_enabled(connection)
+            available = self._has_capacity(connection)
         return {
             "needs_setup": user_count == 0,
-            "registration_enabled": user_count == 0 or enabled,
+            "registration_enabled": (
+                self.allow_first_admin if user_count == 0 else enabled and available
+            ),
         }
 
     def register(self, email: str, display_name: str, password: str) -> dict:
+        return self._create_user(email, display_name, password)
+
+    def create_user(self, email: str, display_name: str, password: str, *, actor_id: str) -> dict:
+        """An active administrator may provision users while registration is closed."""
+        if not actor_id:
+            raise AdminActionError("请使用管理员账号开通用户")
+        return self._create_user(email, display_name, password, actor_id=actor_id)
+
+    def _has_capacity(self, connection) -> bool:
+        return self.max_users is None or connection.execute(
+            "SELECT COUNT(*) FROM users WHERE role='user'"
+        ).fetchone()[0] < self.max_users
+
+    def _create_user(self, email, display_name, password, *, actor_id=None):
         normalized_email = normalize_email(email)
         normalized_name = validate_display_name(display_name)
         password_hash = hash_password(validate_password(password))
@@ -238,9 +266,19 @@ class AuthStore:
             user_count = int(
                 connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             )
-            if user_count and not self._registration_enabled(connection):
+            if not user_count and not self.allow_first_admin:
+                raise RegistrationClosed("请先由服务器管理员初始化账号")
+            if actor_id is not None:
+                actor = connection.execute(
+                    "SELECT role,is_active FROM users WHERE id=?", (actor_id,)
+                ).fetchone()
+                if not actor or actor["role"] != "admin" or not actor["is_active"]:
+                    raise AdminActionError("请使用管理员账号开通用户")
+            if user_count and actor_id is None and not self._registration_enabled(connection):
                 connection.rollback()
                 raise RegistrationClosed("管理员已关闭新用户注册")
+            if user_count and not self._has_capacity(connection):
+                raise RegistrationClosed(f"试运营用户名额已满（{self.max_users} 人），请联系管理员")
             role = "admin" if user_count == 0 else "user"
             try:
                 connection.execute(

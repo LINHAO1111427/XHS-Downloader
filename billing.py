@@ -55,6 +55,10 @@ class BillingError(ValueError):
     pass
 
 
+class BillingConflict(BillingError):
+    """An idempotency key was reused for a different or refunded operation."""
+
+
 class QuotaExceeded(BillingError):
     def __init__(self, usage: dict):
         super().__init__("今日免费点数已用完，请充值后继续生成")
@@ -68,7 +72,14 @@ class BillingStore:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.plans = plans
+        self.unlimited_user_ids: set[str] = set()
         self._initialize()
+
+    def set_unlimited_users(self, user_ids: set[str]) -> None:
+        self.unlimited_user_ids = {str(user_id) for user_id in user_ids if user_id}
+
+    def is_unlimited(self, user_id: str) -> bool:
+        return user_id in self.unlimited_user_ids
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -137,6 +148,12 @@ class BillingStore:
                 );
                 CREATE INDEX IF NOT EXISTS billing_orders_user_created
                     ON billing_orders(user_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS billing_order_requests (
+                    user_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    order_id TEXT NOT NULL REFERENCES billing_orders(id),
+                    PRIMARY KEY(user_id, request_id)
+                );
                 """
             )
             now = int(time())
@@ -168,7 +185,11 @@ class BillingStore:
 
     @staticmethod
     def _date(now: int | float | None = None) -> str:
-        return datetime.fromtimestamp(now or time(), CST).date().isoformat()
+        return (
+            datetime.fromtimestamp(time() if now is None else now, CST)
+            .date()
+            .isoformat()
+        )
 
     def _free_limit(self, connection: sqlite3.Connection) -> int:
         row = connection.execute(
@@ -176,15 +197,18 @@ class BillingStore:
         ).fetchone()
         return int(row[0]) if row else 0
 
-    def _ensure_account(self, connection: sqlite3.Connection, user_id: str, now: int) -> None:
+    def _ensure_account(
+        self, connection: sqlite3.Connection, user_id: str, now: int
+    ) -> None:
         connection.execute(
             "INSERT OR IGNORE INTO billing_accounts(user_id, paid_credits, updated_at) VALUES (?, 0, ?)",
             (user_id, now),
         )
 
-    def _usage_in_transaction(self, connection: sqlite3.Connection, user_id: str, now: int) -> dict:
+    def _usage_in_transaction(
+        self, connection: sqlite3.Connection, user_id: str, now: int
+    ) -> dict:
         date = self._date(now)
-        self._ensure_account(connection, user_id, now)
         daily = connection.execute(
             "SELECT free_used, paid_used FROM billing_daily_usage WHERE user_id=? AND usage_date=?",
             (user_id, date),
@@ -204,13 +228,16 @@ class BillingStore:
             "paid_credits": paid_credits,
             "paid_used_today": paid_used,
             "available_units": max(0, free_limit - free_used) + paid_credits,
+            "unlimited": self.is_unlimited(user_id),
             "costs": {"text": TEXT_COST, "image": IMAGE_COST},
         }
 
     def usage(self, user_id: str, now: int | float | None = None) -> dict:
-        timestamp = int(now or time())
+        timestamp = int(time() if now is None else now)
         with self._connection() as connection:
-            return self._usage_in_transaction(connection, user_id, timestamp)
+            usage = self._usage_in_transaction(connection, user_id, timestamp)
+            connection.commit()
+            return usage
 
     def plans_payload(self) -> list[dict]:
         with self._connection() as connection:
@@ -230,35 +257,71 @@ class BillingStore:
             for row in rows
         ]
 
-    def consume(self, user_id: str, feature: str, units: int, request_id: str, metadata: dict | None = None) -> dict:
-        if not user_id or not request_id or len(request_id) > 160:
+    def consume(
+        self,
+        user_id: str,
+        feature: str,
+        units: int,
+        request_id: str,
+        metadata: dict | None = None,
+    ) -> dict:
+        if (
+            not user_id
+            or not request_id
+            or len(request_id) > 160
+            or request_id.startswith(("refund:", "grant:", "payment:"))
+        ):
             raise BillingError("计费请求标识无效")
-        if units <= 0 or units > 100:
+        if type(units) is not int or units <= 0 or units > 100:
             raise BillingError("计费点数无效")
         now = int(time())
         date = self._date(now)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
-                "SELECT id, units, free_units, paid_units FROM billing_ledger WHERE request_id=?",
+                "SELECT * FROM billing_ledger WHERE request_id=?",
                 (request_id,),
             ).fetchone()
             if existing:
-                connection.commit()
+                if (
+                    existing["user_id"],
+                    existing["feature"],
+                    existing["units"],
+                    existing["entry_type"],
+                ) != (user_id, feature, units, "consume"):
+                    raise BillingConflict("请求标识已用于其他计费操作")
+                if connection.execute(
+                    "SELECT 1 FROM billing_ledger WHERE request_id=?",
+                    (f"refund:{request_id}",),
+                ).fetchone():
+                    raise BillingConflict("该请求已退款，请使用新的请求标识重试")
                 usage = self._usage_in_transaction(connection, user_id, now)
+                connection.commit()
                 return {
-                    "ledger_id": str(existing[0]),
+                    "ledger_id": str(existing["id"]),
                     "request_id": request_id,
-                    "units": int(existing[1]),
-                    "free_units": int(existing[2]),
-                    "paid_units": int(existing[3]),
+                    "units": int(existing["units"]),
+                    "free_units": int(existing["free_units"]),
+                    "paid_units": int(existing["paid_units"]),
                     "status": "already_consumed",
                     "usage": usage,
                 }
             usage = self._usage_in_transaction(connection, user_id, now)
+            if self.is_unlimited(user_id):
+                connection.commit()
+                return {
+                    "ledger_id": f"unlimited:{request_id}",
+                    "request_id": request_id,
+                    "units": units,
+                    "free_units": 0,
+                    "paid_units": 0,
+                    "status": "unlimited",
+                    "usage": usage,
+                }
             if usage["available_units"] < units:
                 connection.rollback()
                 raise QuotaExceeded(usage)
+            self._ensure_account(connection, user_id, now)
             free_units = min(units, usage["free_remaining"])
             paid_units = units - free_units
             connection.execute(
@@ -284,8 +347,26 @@ class BillingStore:
                     free_units, paid_units, metadata, created_at
                 ) VALUES (?, ?, ?, 'consume', ?, ?, ?, ?, ?, ?)
                 """,
-                (ledger_id, user_id, request_id, feature, units, free_units, paid_units, _json(metadata), now),
+                (
+                    ledger_id,
+                    user_id,
+                    request_id,
+                    feature,
+                    units,
+                    free_units,
+                    paid_units,
+                    _json(metadata),
+                    now,
+                ),
             )
+            from request_accounting import current_operation
+
+            operation_id = current_operation.get()
+            if operation_id:
+                connection.execute(
+                    "INSERT INTO api_request_charges(request_id,operation_id,user_id) VALUES(?,?,?)",
+                    (request_id, operation_id, user_id),
+                )
             connection.commit()
             return {
                 "ledger_id": ledger_id,
@@ -302,7 +383,9 @@ class BillingStore:
         refund_request = f"refund:{request_id}"
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if connection.execute("SELECT 1 FROM billing_ledger WHERE request_id=?", (refund_request,)).fetchone():
+            if connection.execute(
+                "SELECT 1 FROM billing_ledger WHERE request_id=?", (refund_request,)
+            ).fetchone():
                 connection.commit()
                 return False
             original = connection.execute(
@@ -329,18 +412,55 @@ class BillingStore:
                     free_units, paid_units, metadata, created_at
                 ) VALUES (?, ?, ?, 'refund', ?, ?, ?, ?, '{}', ?)
                 """,
-                (uuid4().hex, user_id, refund_request, str(original[3]), int(original[0]), free_units, paid_units, now),
+                (
+                    uuid4().hex,
+                    user_id,
+                    refund_request,
+                    str(original[3]),
+                    int(original[0]),
+                    free_units,
+                    paid_units,
+                    now,
+                ),
             )
             connection.commit()
             return True
 
-    def grant(self, user_id: str, units: int, source: str = "admin") -> dict:
-        if units <= 0 or units > 1_000_000:
+    def grant(
+        self,
+        user_id: str,
+        units: int,
+        source: str = "admin",
+        *,
+        request_id: str | None = None,
+        actor_id: str = "",
+    ) -> dict:
+        if not user_id or type(units) is not int or units <= 0 or units > 1_000_000:
             raise BillingError("充值点数无效")
         now = int(time())
-        request_id = f"grant:{uuid4().hex}"
+        if request_id is not None and (not request_id or len(request_id) > 128):
+            raise BillingError("充值请求标识无效")
+        request_id = f"grant:{request_id or uuid4().hex}"
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM billing_ledger WHERE request_id=?", (request_id,)
+            ).fetchone()
+            metadata = _json({"source": source, "actor_id": actor_id})
+            if existing:
+                if (
+                    existing["user_id"],
+                    existing["units"],
+                    existing["feature"],
+                    existing["metadata"],
+                ) != (user_id, units, source, metadata):
+                    raise BillingConflict("充值请求标识已用于其他操作")
+                return {
+                    "ledger_id": existing["id"],
+                    "units": units,
+                    "status": "already_granted",
+                    "usage": self._usage_in_transaction(connection, user_id, now),
+                }
             self._ensure_account(connection, user_id, now)
             connection.execute(
                 "UPDATE billing_accounts SET paid_credits=paid_credits+?, updated_at=? WHERE user_id=?",
@@ -349,29 +469,174 @@ class BillingStore:
             ledger_id = uuid4().hex
             connection.execute(
                 "INSERT INTO billing_ledger(id,user_id,request_id,entry_type,feature,units,paid_units,metadata,created_at) VALUES (?, ?, ?, 'grant', ?, ?, ?, ?, ?)",
-                (ledger_id, user_id, request_id, source, units, units, _json({"source": source}), now),
+                (ledger_id, user_id, request_id, source, units, units, metadata, now),
             )
             connection.commit()
-            return {"ledger_id": ledger_id, "units": units, "usage": self._usage_in_transaction(connection, user_id, now)}
+            return {
+                "ledger_id": ledger_id,
+                "units": units,
+                "usage": self._usage_in_transaction(connection, user_id, now),
+            }
 
-    def create_order(self, user_id: str, plan_id: str) -> dict:
+    def create_order(
+        self,
+        user_id: str,
+        plan_id: str,
+        *,
+        provider: str = "unconfigured",
+        request_id: str | None = None,
+    ) -> dict:
+        if not user_id or provider not in {"unconfigured", "wechat", "alipay"}:
+            raise BillingError("订单参数无效")
+        if request_id is not None and (not request_id or len(request_id) > 128):
+            raise BillingError("订单请求标识无效")
         with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if request_id:
+                previous = connection.execute(
+                    "SELECT o.* FROM billing_orders o JOIN billing_order_requests r ON r.order_id=o.id WHERE r.user_id=? AND r.request_id=?",
+                    (user_id, request_id),
+                ).fetchone()
+                if previous:
+                    if (
+                        previous["plan_id"] != plan_id
+                        or previous["provider"] != provider
+                    ):
+                        raise BillingConflict("订单请求标识已用于其他套餐或支付方式")
+                    return dict(previous)
             row = connection.execute(
                 "SELECT id, price_cents, credits FROM billing_plans WHERE id=? AND active=1 AND price_cents>0",
                 (plan_id,),
             ).fetchone()
-        plan = dict(row) if row else None
-        if not plan:
-            raise BillingError("套餐不存在或无需购买")
-        order_id = uuid4().hex
+            plan = dict(row) if row else None
+            if not plan:
+                raise BillingError("套餐不存在或无需购买")
+            order_id = uuid4().hex
+            now = int(time())
+            connection.execute(
+                "INSERT INTO billing_orders(id,user_id,plan_id,amount_cents,credits,provider,status,created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
+                (
+                    order_id,
+                    user_id,
+                    plan_id,
+                    plan["price_cents"],
+                    plan["credits"],
+                    provider,
+                    now,
+                ),
+            )
+            if request_id:
+                connection.execute(
+                    "INSERT INTO billing_order_requests VALUES (?, ?, ?)",
+                    (user_id, request_id, order_id),
+                )
+            connection.commit()
+        return self.order(user_id, order_id)
+
+    def order(self, user_id: str, order_id: str) -> dict:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM billing_orders WHERE id=? AND user_id=?",
+                (order_id, user_id),
+            ).fetchone()
+        if not row:
+            raise BillingError("订单不存在")
+        return dict(row)
+
+    def settle_verified_order(
+        self,
+        order_id: str,
+        *,
+        provider: str,
+        transaction_id: str,
+        amount_cents: int,
+        currency: str = "CNY",
+    ) -> dict:
+        """Internal boundary: invoke only after authenticating the provider event.
+
+        Order transition and credit grant commit in the SAME transaction. A
+        browser success URL or a checkout response must never call this method.
+        """
+        if (
+            provider not in {"wechat", "alipay"}
+            or not transaction_id
+            or len(transaction_id) > 128
+        ):
+            raise BillingError("支付流水无效")
+        if type(amount_cents) is not int or amount_cents <= 0 or currency != "CNY":
+            raise BillingError("支付金额或币种无效")
+        payment_id = f"{provider}:{transaction_id}"
         now = int(time())
         with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM billing_orders WHERE id=?", (order_id,)
+            ).fetchone()
+            if (
+                not row
+                or row["provider"] != provider
+                or row["amount_cents"] != amount_cents
+            ):
+                raise BillingError("支付通知与订单不匹配")
+            if row["status"] == "paid":
+                if row["provider_order_id"] != payment_id:
+                    raise BillingConflict("订单已由其他支付流水完成")
+                return dict(row)
+            if row["status"] != "pending":
+                raise BillingConflict("订单状态不支持入账")
+            if connection.execute(
+                "SELECT 1 FROM billing_orders WHERE provider_order_id=?", (payment_id,)
+            ).fetchone():
+                raise BillingConflict("支付流水已用于其他订单")
+            self._ensure_account(connection, row["user_id"], now)
             connection.execute(
-                "INSERT INTO billing_orders(id,user_id,plan_id,amount_cents,credits,status,created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
-                (order_id, user_id, plan_id, plan["price_cents"], plan["credits"], now),
+                "UPDATE billing_accounts SET paid_credits=paid_credits+?, updated_at=? WHERE user_id=?",
+                (row["credits"], now, row["user_id"]),
+            )
+            connection.execute(
+                "INSERT INTO billing_ledger(id,user_id,request_id,entry_type,feature,units,paid_units,metadata,created_at) VALUES(?,?,?,'grant','payment',?,?,?,?)",
+                (
+                    uuid4().hex,
+                    row["user_id"],
+                    f"payment:{order_id}",
+                    row["credits"],
+                    row["credits"],
+                    _json(
+                        {
+                            "order_id": order_id,
+                            "provider": provider,
+                            "transaction_id": transaction_id,
+                            "amount_cents": amount_cents,
+                            "currency": currency,
+                        }
+                    ),
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE billing_orders SET status='paid',provider_order_id=?,paid_at=? WHERE id=?",
+                (payment_id, now, order_id),
             )
             connection.commit()
-        return {"id": order_id, "plan_id": plan_id, "amount_cents": plan["price_cents"], "credits": plan["credits"], "status": "pending", "provider": "unconfigured"}
+        return self.order(row["user_id"], order_id)
+
+    def audit(self) -> dict:
+        """Reconcile purchased credits against the append-only ledger."""
+        with self._connection() as connection:
+            mismatches = connection.execute("""
+                SELECT a.user_id, a.paid_credits,
+                       COALESCE(SUM(CASE WHEN l.entry_type='consume' THEN -l.paid_units ELSE l.paid_units END),0) AS expected
+                FROM billing_accounts a LEFT JOIN billing_ledger l ON l.user_id=a.user_id
+                GROUP BY a.user_id HAVING a.paid_credits != expected
+            """).fetchall()
+            orders = connection.execute(
+                "SELECT o.id FROM billing_orders o LEFT JOIN billing_ledger l ON l.request_id='payment:' || o.id WHERE o.status='paid' AND (l.id IS NULL OR l.user_id!=o.user_id OR l.paid_units!=o.credits)"
+            ).fetchall()
+        return {
+            "ok": not mismatches and not orders,
+            "accounts": [dict(row) for row in mismatches],
+            "orders": [row[0] for row in orders],
+        }
 
 
 def _json(value: dict | None) -> str:

@@ -2,6 +2,7 @@ from datetime import datetime
 
 from ..expansion import Namespace
 from ..translation import _
+from .product import extract_products
 
 __all__ = ["Explore"]
 
@@ -11,6 +12,10 @@ class Explore:
 
     def run(self, data: Namespace) -> dict:
         return self.__extract_data(data)
+
+    @staticmethod
+    def products(data: Namespace) -> list[dict]:
+        return extract_products(data.__dict__ if data else {})
 
     def __extract_data(self, data: Namespace) -> dict:
         result = {}

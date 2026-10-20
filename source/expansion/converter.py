@@ -1,8 +1,9 @@
 from re import compile
+from json import loads, JSONDecodeError
 from typing import Union
 
 from lxml.etree import HTML
-from yaml import safe_load
+from yaml import safe_load, YAMLError
 
 __all__ = ["Converter"]
 
@@ -10,6 +11,8 @@ __all__ = ["Converter"]
 class Converter:
     YAML_ILLEGAL = compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
     INITIAL_STATE = "//script/text()"
+    ASSIGNMENT = compile(r"^\s*window\.__INITIAL_STATE__\s*=\s*")
+    JS_VALUES = compile(r'("(?:\\.|[^"\\])*")|\bundefined\b|new Map\(\[\]\)')
     PC_KEYS_LINK = (
         "note",
         "noteDetailMap",
@@ -29,14 +32,23 @@ class Converter:
         if not html:
             return ""
         html_tree = HTML(html)
+        if html_tree is None:
+            return ""
         scripts = html_tree.xpath(self.INITIAL_STATE)
         return self.get_script(scripts)
 
     @classmethod
     def _convert_object(cls, text: str) -> dict:
-        cleaned = cls.YAML_ILLEGAL.sub("", text.lstrip("window.__INITIAL_STATE__="))
-        cleaned = cleaned.replace("new Map([])", "[]").replace("undefined", "null")
-        return safe_load(cleaned)
+        cleaned = cls.YAML_ILLEGAL.sub("", cls.ASSIGNMENT.sub("", text)).strip().rstrip(";")
+        cleaned = cls.JS_VALUES.sub(lambda match: match.group(1) or ("[]" if match.group() == "new Map([])" else "null"), cleaned)
+        try:
+            return loads(cleaned)
+        except JSONDecodeError:
+            try:
+                value = safe_load(cleaned)
+                return value if isinstance(value, dict) else {}
+            except YAMLError:
+                return {}
 
     @classmethod
     def _filter_object(cls, data: dict) -> dict:
@@ -75,7 +87,7 @@ class Converter:
             (
                 script
                 for script in scripts
-                if script.startswith("window.__INITIAL_STATE__")
+                if Converter.ASSIGNMENT.match(script)
             ),
             "",
         )
